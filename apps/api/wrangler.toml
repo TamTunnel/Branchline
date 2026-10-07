@@ -1,39 +1,16 @@
-# Branchline API worker — Cloudflare deployment config.
-# See DEPLOY.md for the credential + provisioning checklist.
-# Local dev does NOT use this file (use `npm run dev` in apps/api with .dev.vars).
-
 name = "branchline"
 main = "src/index.ts"
 compatibility_date = "2026-10-01"
-# isomorphic-git needs Node's Buffer (GitPktLine stream parsing throws
-# "Missing Buffer dependency" without it); nodejs_compat provides it.
-compatibility_flags = ["nodejs_compat"]
 
 [vars]
-# BL_TOKEN = ""  # prefer `wrangler secret put BL_TOKEN`; repo-scoped API token, optional
-# BL_REPO = "branchline"  # Artifacts repo name for the git backend
-# BL_REMOTE = ""  # git remote URL for the Artifacts repo, from
-  # `artifacts.create` output or the dashboard. Required at deploy time
-  # unless the binding's repo handle exposes `remote` itself.
+# REPO_PATH = "/path/to/working/repo"   # set via .dev.vars locally, secret-free
 
-# --- D1: branch registry, intent manifests, merge-queue state ---------------
 [[d1_databases]]
 binding = "DB"
 database_name = "branchline"
-database_id = "FILL_ME__wrangler_d1_create_branchline"  # then: wrangler d1 execute branchline --file=../../schema/001_init.sql
-# Apply in order: schema/001_init.sql, schema/002_merge_sha.sql
+database_id = "local-dev"
 
-# --- KV: diff-response cache (1h TTL) ---------------------------------------
-# The worker falls back to a process-local Map when this binding is absent,
-# so KV is optional — but bind it in production for cross-instance caching.
-[[kv_namespaces]]
-binding = "DIFF_CACHE"
-id = "FILL_ME__wrangler_kv_namespace_create_DIFF_CACHE"
-
-# --- Queues: merge jobs ------------------------------------------------------
-# POST /api/merge sends to the queue when MERGE_QUEUE is bound (202 queued);
-# the consumer below processes each job. Local dev has no queue binding and
-# processes merges inline instead.
+# Production merge jobs run on Queues; local dev processes the queue inline.
 [[queues.producers]]
 binding = "MERGE_QUEUE"
 queue = "branchline-merge"
@@ -41,15 +18,3 @@ queue = "branchline-merge"
 [[queues.consumers]]
 queue = "branchline-merge"
 max_batch_size = 1
-max_retries = 2
-
-# --- Artifacts: git backend (production) -----------------------------------
-# The worker's GitBackend interface is backend-agnostic. With ARTIFACTS
-# bound, `createBackend()` selects ArtifactsGitBackend
-# (apps/api/src/git/artifacts-git.ts): reads go through the binding's
-# native operations; mutations clone into an in-memory filesystem and push
-# via isomorphic-git. Without the binding, LocalGitBackend is used
-# (needs a git working repo: local dev / self-hosted only).
-[[artifacts]]
-binding = "ARTIFACTS"
-namespace = "branchline"   # create/manage via the Artifacts dashboard or API
