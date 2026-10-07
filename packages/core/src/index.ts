@@ -1,8 +1,7 @@
 export * from "./types.js";
 export * from "./manifest.js";
-// Implemented by the core subagent:
-// export * from "./diff.js";   -> buildFileOps(base: FileMap, head: FileMap): FileOp[]
-// export * from "./merge.js";  -> classifyTier(...), threeWayMerge(...), decideMerge(...)
+export * from "./diff.js";
+export * from "./merge.js";
 //
 // Planned pure-function surface (do not change signatures without updating
 // apps/api and apps/cli implementers):
