@@ -1,1 +1,1 @@
-{"dependencies":{"@branchline/core":"*","@hono/node-server":"^1.19.1","hono":"^4.9.5"},"license":"MIT","name":"@branchline/api","private":true,"scripts":{"dev":"node --env-file=.dev.vars src/local-server.ts","typecheck":"tsc --noEmit"},"type":"module","version":"0.1.0"}
+{"dependencies":{"@branchline/core":"*","@hono/node-server":"^1.19.1","hono":"^4.9.5"},"license":"Apache-2.0","name":"@branchline/api","private":true,"scripts":{"dev":"node --env-file=.dev.vars src/local-server.ts","typecheck":"tsc --noEmit"},"type":"module","version":"0.1.0"}
