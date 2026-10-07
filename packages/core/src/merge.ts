@@ -6,6 +6,7 @@
  * API layer turns them into ConflictArtifact JSON.
  */
 import { diff3Merge } from "node-diff3";
+import { globMatch } from "./diff.js";
 import type {
   ConflictArtifact,
   IntentManifest,
@@ -94,13 +95,13 @@ export interface DecideMergeArgs {
   theirsFiles: FileMap;
   oursManifest: IntentManifest;
   theirsManifest: IntentManifest;
-  /**
-   * Declared touch globs for each side (usually the manifests' touches).
-   * Advisory only — recorded for intent display and agent coordination,
-   * never consulted for merge safety (see computeMerge).
-   */
+  /** Declared touch globs for each side (usually the manifests' touches). */
   oursTouches: string[];
   theirsTouches: string[];
+}
+
+function touchedBy(globs: string[], file: string): boolean {
+  return globs.some((g) => globMatch(g, file));
 }
 
 interface MergeComputation {
@@ -115,26 +116,19 @@ interface MergeComputation {
  * Decide the merge tier without touching the filesystem. Pure: the API
  * layer applies the returned decision via GitBackend.applyMerge.
  *
- * Safety is decided by ACTUAL content changes, never by declared intent:
- * - Tier 1: no file was changed by both sides → clean merge,
+ * - Tier 1: the two sides' touched-file sets are disjoint → clean merge,
  *   merged_files = every file changed by either side.
- * - Tier 2/3: every file changed by both sides goes through
- *   threeWayMergeFile (it can succeed even when changed line ranges
- *   overlap). Successes land in merged_files; failures become
- *   ConflictArtifact entries.
+ * - Tier 2/3: for each file touched by both sides, attempt threeWayMergeFile
+ *   (it can succeed even when changed line ranges overlap). Successes land
+ *   in merged_files; failures become ConflictArtifact entries.
  * - Tier 3 iff any conflicts: status "needs-resolution", merged_files holds
  *   only the clean files.
  *
- * The manifests' declared `touches` globs are advisory only (intent
- * display, dashboard, agent coordination). They never gate merge safety:
- * a file changed by both sides is always merged three-way, even when one
- * side's manifest does not declare it. Attribution narrowing may only ever
- * escalate a merge to a higher tier — it can never silently resolve a
- * both-sides change at tier 1, because content comparison, not
- * attribution, decides.
+ * A file matching neither side's touch globs counts as touched by BOTH
+ * (conservative).
  */
 function computeMerge(args: DecideMergeArgs): MergeComputation {
-  const { baseFiles, oursFiles, theirsFiles, oursManifest, theirsManifest } = args;
+  const { baseFiles, oursFiles, theirsFiles, oursManifest, theirsManifest, oursTouches, theirsTouches } = args;
 
   const allPaths = new Set<string>();
   for (const m of [baseFiles, oursFiles, theirsFiles]) {
@@ -149,14 +143,15 @@ function computeMerge(args: DecideMergeArgs): MergeComputation {
   }
   const changedFiles = [...new Set([...oursChanged, ...theirsChanged])].sort();
 
-  // The safety-critical set: files ACTUALLY changed by both sides, from
-  // content comparison alone. Declared touch globs are deliberately NOT
-  // consulted here — a both-sides change must always go through the
-  // three-way merge, even if one side's manifest never declared the file
-  // (otherwise the other side's change would be silently discarded).
-  const bothChanged = new Set(
-    [...oursChanged].filter((f) => theirsChanged.has(f)),
-  );
+  const oursTouched = new Set<string>();
+  const theirsTouched = new Set<string>();
+  for (const f of changedFiles) {
+    const mo = touchedBy(oursTouches, f);
+    const mt = touchedBy(theirsTouches, f);
+    if (mo || !mt) oursTouched.add(f);
+    if (mt || !mo) theirsTouched.add(f);
+  }
+  const overlap = new Set([...oursTouched].filter((f) => theirsTouched.has(f)));
 
   const contents: Record<string, string | null> = {};
   const conflicts: ConflictArtifact[] = [];
@@ -165,13 +160,13 @@ function computeMerge(args: DecideMergeArgs): MergeComputation {
   const singleSideContent = (f: string): string | null =>
     oursChanged.has(f) ? contentOf(oursFiles, f) : contentOf(theirsFiles, f);
 
-  if (bothChanged.size === 0) {
+  if (overlap.size === 0) {
     for (const f of changedFiles) contents[f] = singleSideContent(f);
     return { tier: 1, status: "merged", mergedFiles: changedFiles, contents, conflicts };
   }
 
   for (const f of changedFiles) {
-    if (!bothChanged.has(f)) {
+    if (!overlap.has(f)) {
       contents[f] = singleSideContent(f);
       clean.push(f);
       continue;
