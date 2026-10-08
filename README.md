@@ -105,14 +105,13 @@ needs-resolution).
 npm test            # vitest: unit (core) + API integration (Hono app.request, temp git repo, D1 shim)
 ```
 
-52 tests green. `npx tsc --noEmit` clean in `packages/core`, `apps/api`, `apps/cli`.
-
+53 tests green. `npx tsc --noEmit` clean in `packages/core`, `apps/api`, `apps/cli`.
 ## Competition submission notes
 
 - Entry: **Branchline** — "Git rebuilt for parallel agents".
 - License: **Apache-2.0** (competition-compatible).
 - What's real: semantic branches + D1 registry, agent-readable JSON diffs,
-  deterministic 3-tier merge queue, Bitwarden-style token auth stub,
+  deterministic 3-tier merge queue, Bearer-token auth stub,
   server-rendered dashboard, full local test suite + demo rehearsal.
 - What's stubbed (documented, not hidden): KV diff cache falls back to
   in-memory; merge queue processes inline without a Queue binding; the
