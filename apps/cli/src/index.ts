@@ -334,9 +334,9 @@ const main = defineCommand({
     merge: mergeCmd,
     queue: queueCmd,
   },
-  run() {
-    console.log("No command specified. Run `bl --help` to see available commands.");
-  },
+  // No `run` here: citty fires the parent `run` even when a subcommand was
+  // dispatched, so omitting it keeps subcommand output clean. With no
+  // subcommand, citty reports "No command specified." and shows usage.
 });
 
 runMain(main).catch((err: unknown) => {
