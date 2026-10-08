@@ -1,7 +1,8 @@
 import { execFile } from "node:child_process";
 import { mkdir, unlink, writeFile as fsWriteFile } from "node:fs/promises";
 import { dirname, resolve, sep } from "node:path";
-import type { GitBackend } from "@branchline/core";
+import type { ArtifactsBinding, GitBackend } from "@branchline/core";
+import { ArtifactsGitBackend } from "./artifacts-git.js";
 
 const AUTHOR = ["-c", "user.name=branchline", "-c", "user.email=branchline@local"];
 
@@ -153,18 +154,23 @@ export class LocalGitBackend implements GitBackend {
 /**
  * Select the GitBackend for this environment.
  *
- * Today the only real implementation is LocalGitBackend (working git repo at
- * REPO_PATH). When the Cloudflare Artifacts binding is present, the
- * Artifacts-backed implementation plugs in here behind the same GitBackend
- * interface — it does not exist yet, so binding ARTIFACTS fails loudly
- * instead of silently doing the wrong thing. See DEPLOY.md.
+ * When the Cloudflare Artifacts binding is present, the production
+ * ArtifactsGitBackend is used (Workers + Artifacts: repos as a service,
+ * mutations via isomorphic-git over an in-memory filesystem). Otherwise the
+ * LocalGitBackend is used (working git repo at REPO_PATH: local dev / tests).
  */
-export function createBackend(env: { ARTIFACTS?: unknown; REPO_PATH: string }): GitBackend {
+export function createBackend(env: {
+  ARTIFACTS?: ArtifactsBinding;
+  REPO_PATH: string;
+  BL_REPO?: string;
+  BL_REMOTE?: string;
+}): GitBackend {
   if (env.ARTIFACTS) {
-    throw new Error(
-      "Artifacts-backed GitBackend is not implemented yet (see DEPLOY.md). " +
-        "Unbind ARTIFACTS to use the local git backend.",
-    );
+    return new ArtifactsGitBackend({
+      artifacts: env.ARTIFACTS,
+      repoName: env.BL_REPO ?? "branchline",
+      remote: env.BL_REMOTE,
+    });
   }
   return new LocalGitBackend(env.REPO_PATH);
 }

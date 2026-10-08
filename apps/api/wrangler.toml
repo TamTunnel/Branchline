@@ -5,9 +5,16 @@
 name = "branchline"
 main = "src/index.ts"
 compatibility_date = "2026-10-01"
+# isomorphic-git needs Node's Buffer (GitPktLine stream parsing throws
+# "Missing Buffer dependency" without it); nodejs_compat provides it.
+compatibility_flags = ["nodejs_compat"]
 
 [vars]
 # BL_TOKEN = ""  # prefer `wrangler secret put BL_TOKEN`; repo-scoped API token, optional
+# BL_REPO = "branchline"  # Artifacts repo name for the git backend
+# BL_REMOTE = ""  # git remote URL for the Artifacts repo, from
+  # `artifacts.create` output or the dashboard. Required at deploy time
+  # unless the binding's repo handle exposes `remote` itself.
 
 # --- D1: branch registry, intent manifests, merge-queue state ---------------
 [[d1_databases]]
@@ -36,14 +43,13 @@ queue = "branchline-merge"
 max_batch_size = 1
 max_retries = 2
 
-# --- Artifacts: git backend (FUTURE — not implemented yet) -------------------
-# The worker's GitBackend interface is backend-agnostic. Today only
-# LocalGitBackend exists (needs a git working repo: local dev / self-hosted).
-# The production backend will be implemented against the Artifacts Workers
-# binding (git repos as a service), selected automatically when bound.
-# Until then, leave this commented out — binding ARTIFACTS makes the worker
-# fail loudly rather than silently misbehave.
-#
-# [[artifacts]]
-# binding = "ARTIFACTS"
-# namespace = "default"   # create/manage via the Artifacts dashboard or API
+# --- Artifacts: git backend (production) -----------------------------------
+# The worker's GitBackend interface is backend-agnostic. With ARTIFACTS
+# bound, `createBackend()` selects ArtifactsGitBackend
+# (apps/api/src/git/artifacts-git.ts): reads go through the binding's
+# native operations; mutations clone into an in-memory filesystem and push
+# via isomorphic-git. Without the binding, LocalGitBackend is used
+# (needs a git working repo: local dev / self-hosted only).
+[[artifacts]]
+binding = "ARTIFACTS"
+namespace = "branchline"   # create/manage via the Artifacts dashboard or API

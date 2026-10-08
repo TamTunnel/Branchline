@@ -12,8 +12,18 @@ credentials exist in this environment.
    - a Cloudflare **API token** with permissions: Workers Scripts (edit),
      D1 (edit), KV (edit), Queues (edit). (`CLOUDFLARE_API_TOKEN` env var;
      also needs the **Account ID**.)
-2. **Confirmation of the Artifacts namespace** to use for the git backend
-   (or "skip Artifacts for now" — see below).
+2. **An Artifacts namespace + repo for the git backend**:
+   - Create the namespace (dashboard or API), then create the repo, e.g.
+     via the setup prompt in the [Artifacts
+     docs](https://developers.cloudflare.com/artifacts/get-started/workers/),
+     or `artifacts.create("branchline", { setDefaultBranch: "main" })`
+     from a Worker. Note the **git remote URL** from the create output.
+   - Push an initial commit to `main` (an empty repo cannot be cloned).
+   - Set vars: `BL_REPO` (default `"branchline"`) and `BL_REMOTE`
+     (the git remote URL) in `wrangler.toml` `[vars]`, or via
+     `wrangler secret put` / `--var` at deploy time. `BL_REMOTE` is only
+     skippable if the binding's repo handle exposes `remote` itself —
+     assume it is required until proven otherwise against live credentials.
 
 No other secrets are required. `BL_TOKEN` (repo-scoped API token for the
 worker's mutating routes) is set at deploy time via
@@ -38,10 +48,15 @@ wrangler kv namespace create DIFF_CACHE
 # 4. Queues — merge jobs
 wrangler queues create branchline-merge
 
-# 5. secrets / vars
+# 5. Artifacts — git backend repo
+#    create the namespace + repo (dashboard, API, or the docs' setup prompt),
+#    push an initial commit to main, then set BL_REPO / BL_REMOTE in
+#    wrangler.toml [vars] (see "What P needs to provide" §2).
+
+# 6. secrets / vars
 wrangler secret put BL_TOKEN
 
-# 6. deploy
+# 7. deploy
 wrangler deploy
 ```
 
@@ -52,33 +67,49 @@ wrangler deploy
 | `DB`          | D1       | branch registry, intent manifests, merge-queue state | ready         |
 | `DIFF_CACHE`  | KV       | `GET /api/diff` response cache (1h TTL)              | ready (optional; in-memory fallback) |
 | `MERGE_QUEUE` | Queues   | merge-job producer + consumer                        | ready         |
-| `ARTIFACTS`   | Artifacts| git backend (repos as a service)                     | **not implemented** — see below |
+| `ARTIFACTS`   | Artifacts| git backend (repos as a service)                     | **implemented** — `ArtifactsGitBackend` (see below) |
 
-## Known production gap: the Artifacts GitBackend
+## The Artifacts GitBackend (implemented, not yet run live)
 
 The worker is written against the `GitBackend` interface
-(`packages/core/src/types.ts`). The only implementation today is
-`LocalGitBackend`, which shells out to the `git` binary against a working
-repo at `REPO_PATH` — fine for local dev and self-hosted, unusable on
-Workers.
+(`packages/core/src/types.ts`). `ArtifactsGitBackend`
+(`apps/api/src/git/artifacts-git.ts`) implements it for production:
 
-The production implementation must be written against the [Artifacts
-Workers binding](https://developers.cloudflare.com/artifacts/get-started/workers/)
-(`[[artifacts]]` in `wrangler.toml`, already stubbed there commented out)
-and selected in `createBackend()` (`apps/api/src/git/local-git.ts`).
-Binding `ARTIFACTS` today makes the worker fail loudly rather than silently
-misbehave — that is intentional.
+- **Reads** (`revParse`, `branchExists`, `listFiles`, `readFile`) use the
+  binding's native operations (`log`, `readFile`, `readCommit`/`readTree`).
+  `listFiles` falls back to a clone + `git.walk` if the binding's tree
+  shapes differ from the documented ones.
+- **Mutations** clone the repo into an in-memory filesystem
+  (`apps/api/src/git/memory-fs.ts`, clean-room), apply the change with
+  isomorphic-git, and push — one full clone per backend instance (i.e. per
+  request/queue batch), reused across that instance's ops. Artifacts is the
+  source of truth; nothing persists in the Worker.
+- **Auth**: a repo-scoped write token is minted per instance via
+  `repo.createToken("write", 3600)` and cached until 60s before expiry.
+  The `?expires=` suffix is stripped for git Basic auth (username `x`).
+  Tokens never appear in logs or error messages.
+- **Merge**: `git.merge` with a custom driver — fast-forwards when
+  possible, else a merge commit; `.branchline.json` resolves in favor of
+  the merged branch (the `-X theirs` equivalent; D1 is the source of truth
+  for manifests). Any other conflict fails loudly — agents never see raw
+  `<<<<<<<` markers.
+- **wrangler**: the `[[artifacts]]` block is active in
+  `apps/api/wrangler.toml`, and `compatibility_flags = ["nodejs_compat"]`
+  is set because isomorphic-git requires Node's `Buffer`.
 
-Estimated shape of the work: implement `GitBackend` over Artifacts repo
-handles (create branch ≈ fork/create ref, readFile ≈ read blob at ref,
-merge ≈ apply tree, etc.), then uncomment the `[[artifacts]]` block and
-deploy. Until then, production deploys should keep `ARTIFACTS` unbound and
-will fail on any git operation — **do not deploy to production until the
-Artifacts backend exists**, unless the goal is only to serve the dashboard
-and branch registry (which need no git).
+**Honest verification gap** (no live Artifacts credentials exist in this
+environment): the binding call shapes (`log` entry fields, `readTree`
+entry fields, `readBlob`, `createToken` response) are implemented from the
+docs and handled defensively, but the mutation path (clone/push against a
+real Artifacts remote) has not been exercised end-to-end. The first deploy
+should run the demo script against the deployed worker and watch for
+`artifacts git <op> failed` errors, which name the exact failing primitive.
 
-## What works the day it deploys (with D1 + Queues, no Artifacts)
+## What works the day it deploys (D1 + Queues + Artifacts bound)
 
-- Branch registry API + dashboard (no git needed)
-- Merge queue accepts jobs (202 queued) and the consumer processes them —
-  but every job will fail at the git step until the Artifacts backend lands.
+- Branch registry API + dashboard
+- Full git backend: semantic branches, JSON diffs, 3-tier merge queue —
+  the queue consumer processes jobs against the Artifacts repo
+- First-deploy smoke test: run the demo script (`npm run demo`) against
+  the deployed worker URL and confirm merges land; check logs for
+  `artifacts git <op> failed` (names the exact failing primitive)

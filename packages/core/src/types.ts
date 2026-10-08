@@ -114,9 +114,63 @@ export interface GitBackend {
   mergeBase(a: string, b: string): Promise<string>;
 }
 
+/**
+ * Minimal structural surface of the Cloudflare Artifacts Workers binding
+ * used by Branchline. Structural typing: the real binding is assignable as
+ * long as it provides at least these members. Shapes below follow the
+ * Artifacts Workers docs; anything not verifiable without live credentials
+ * is marked and the backend degrades to explicit errors, never silent
+ * wrong behavior.
+ */
+export interface ArtifactsBlob {
+  text(): Promise<string>;
+  arrayBuffer(): Promise<ArrayBuffer>;
+}
+
+export interface ArtifactsRepoHandle {
+  /** Mint a repo-scoped git token. `plaintext` may carry a `?expires=` suffix. */
+  createToken(
+    capability: string,
+    ttlSeconds: number,
+  ): Promise<{ plaintext: string; expiresAt: string }>;
+  /** Read a file at a ref. Null when the file does not exist. */
+  readFile(options: { ref: string; path: string }): Promise<ArtifactsBlob | null>;
+  /** Recent commits at a ref, newest first. */
+  log(options: {
+    ref: string;
+    limit?: number;
+  }): Promise<Array<{ oid: string }>>;
+  /** Read a commit object; `commit.tree` is the root tree hash. */
+  readCommit(oid: string): Promise<{ commit: { tree: string } }>;
+  /**
+   * Read a tree object. Accepts the two plausible shapes (`entries` per the
+   * docs-style naming, `tree` per isomorphic-git's naming); anything else
+   * is a hard error surfaced to the caller.
+   */
+  readTree(oid: string): Promise<
+    | { entries: Array<{ path: string; type: string; oid: string }> }
+    | { tree: Array<{ path: string; type: string; oid: string }> }
+  >;
+  readBlob(oid: string): Promise<ArtifactsBlob | null>;
+  [Symbol.asyncDispose](): Promise<void>;
+}
+
+export interface ArtifactsBinding {
+  create(
+    name: string,
+    options?: { description?: string; setDefaultBranch?: string },
+  ): Promise<{
+    name: string;
+    remote: string;
+    defaultBranch: string;
+    token: string;
+  }>;
+  /** Disposable repo handle (`using repo = await artifacts.get(name)`). */
+  get(name: string): Promise<ArtifactsRepoHandle>;
+}
+
 /** Minimal D1 surface the API uses (subset of D1Database). */
-export interface Db {
-  prepare(query: string): {
+export interface Db {  prepare(query: string): {
     bind(...params: unknown[]): {
       all<T = Record<string, unknown>>(): Promise<{ results: T[] }>;
       first<T = Record<string, unknown>>(): Promise<T | null>;
@@ -143,8 +197,16 @@ export interface Env {
   MERGE_QUEUE?: {
     send(message: unknown): Promise<void>;
   };
-  /** Optional Cloudflare Artifacts binding (future GitBackend). When bound,
-   *  createBackend selects the Artifacts-backed implementation; until that
-   *  implementation lands it throws a clear error. */
-  ARTIFACTS?: unknown;
+  /** Optional Cloudflare Artifacts binding. When bound, `createBackend`
+   *  selects the Artifacts-backed GitBackend (production path on Workers);
+   *  when absent, the local git backend is used (dev/test). */
+  ARTIFACTS?: ArtifactsBinding;
+  /** Artifacts repo name for the git backend. Default: "branchline". */
+  BL_REPO?: string;
+  /**
+   * Git remote URL for the Artifacts repo (from `artifacts.create` output or
+   * the dashboard). Required when ARTIFACTS is bound and the binding's repo
+   * handle does not expose `remote` itself.
+   */
+  BL_REMOTE?: string;
 }

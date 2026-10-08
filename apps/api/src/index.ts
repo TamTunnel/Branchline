@@ -11,12 +11,11 @@ import { renderDashboard } from "./dashboard.js";
 /**
  * Build the Hono app.
  *
- * NOTE: createBackend selects LocalGitBackend (working git repo at REPO_PATH)
- * unless the ARTIFACTS binding is present. LocalGitBackend shells out to
- * `git`, so it only runs where a working repo and the git binary exist
- * (local dev / self-hosted). The Cloudflare Artifacts backend plugs in
- * behind the same GitBackend interface for the real Worker — route code
- * only depends on the interface.
+ * NOTE: createBackend selects ArtifactsGitBackend when the ARTIFACTS binding
+ * is present (production on Workers) and LocalGitBackend otherwise (working
+ * git repo at REPO_PATH: local dev / tests). LocalGitBackend shells out to
+ * `git`, so it only runs where a working repo and the git binary exist.
+ * Route code only depends on the GitBackend interface.
  */
 export function createApp(env: Env) {
   const backend = createBackend(env);
