@@ -12,11 +12,12 @@ export function registerQueueRoutes(
     const limit =
       Number.isFinite(rawLimit) && rawLimit > 0 ? Math.min(rawLimit, 200) : 50;
     const rows = await listMerges(db, limit);
-    return c.json(
-      rows.map((r) => ({
+    // Envelope shape: this is what `bl queue` consumes.
+    return c.json({
+      queue: rows.map((r) => ({
         ...r,
         artifact: r.artifact ? JSON.parse(r.artifact) : null,
       })),
-    );
+    });
   });
 }

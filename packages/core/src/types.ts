@@ -137,4 +137,14 @@ export interface Env {
     get(key: string): Promise<string | null>;
     put(key: string, value: string, opts?: { expirationTtl?: number }): Promise<void>;
   };
+  /** Optional queue producer for merge jobs. When bound, POST /api/merge
+   *  enqueues and returns 202; the queue consumer processes the job.
+   *  When absent (local dev), merges are processed inline. */
+  MERGE_QUEUE?: {
+    send(message: unknown): Promise<void>;
+  };
+  /** Optional Cloudflare Artifacts binding (future GitBackend). When bound,
+   *  createBackend selects the Artifacts-backed implementation; until that
+   *  implementation lands it throws a clear error. */
+  ARTIFACTS?: unknown;
 }

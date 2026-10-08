@@ -37,8 +37,7 @@ Built for the Cloudflare **"Build the next Git platform"** competition
                                    ┌────────▼─────────┐
                                    │ LocalGitBackend  │  (dev/test:
                                    │ (git CLI)        │   working repo)
-                                   │ ArtifactsBackend │  (prod: Workers
-                                   │ (isomorphic-git) │   + Artifacts)
+                                   │ ArtifactsBackend │  (future: prod)
                                    └──────────────────┘
 
   packages/core — pure logic, no I/O:
@@ -74,38 +73,15 @@ cd apps/cli && npm run build && cd -
 BL=node apps/cli/dist/index.js
 $BL branch --intent "add oauth login" --touches "src/auth/**" --agent agent-1
 $BL branches
-
-# 4. commit work to the branch through the API (from the agent's own dir)
-mkdir -p /tmp/agent-1 && cd /tmp/agent-1
-echo "oauth stub" > oauth.ts
-$BL commit bl/agent-1-add-oauth-login-<hash> --repo /tmp/agent-1 -m "agent-1: add oauth"
-# (use the branch name printed by step 3); then $BL merge <branch>
 ```
 
 Useful env vars: `BL_API` (API base URL, default `http://127.0.0.1:8787`),
 `BL_TOKEN` (repo-scoped token; also set server-side to require auth).
-In production (the `ARTIFACTS` binding is present) the server **fails closed**:
-mutating routes return `503` unless `BL_TOKEN` is set. `BL_ALLOW_ANON=1`
-opts back into open mode — local dev only, never production.
-
-Notes:
-
-- `bl commit` accepts `--expected-sha <sha>` for optimistic concurrency: the
-  commit is refused with 409 if the branch moved since. Without it,
-  concurrent commits to one branch are last-writer-wins.
-- Branch names contain slashes (e.g. `bl/agent-1-add-oauth-login-a1b2c3-d4e5`);
-  URL-encode them in raw curl calls — the `bl` CLI handles this for you.
-- D1 is the manifest source of truth; hand edits to `.branchline.json` in
-  the repo are overwritten at merge time.
 
 ## The demo rehearsal
 
-`scripts/demo.sh` is the competition-video rehearsal — 4 simulated agents
-(simulated shell processes driving the production API concurrently;
-stand-ins for real AI coding agents, which would use the same `bl` commands)
-cut from the same base, working **concurrently** (parallel file writes +
-API commits from isolated working dirs), then sequential merges across all
-three tiers:
+`scripts/demo.sh` is the competition-video rehearsal — 4 simulated agents,
+same base, sequential merges across all three tiers:
 
 | Agent | Change | Merge |
 |---|---|---|
@@ -119,32 +95,9 @@ three tiers:
 bash scripts/demo.sh   # spins up API + repo, asserts every tier, prints DEMO PASS
 ```
 
-Assertions: all 5 branches cut from the same base SHA, correct tier per
-merge, no `<<<<<<<` anywhere, merged content present on `main`, D1 registry
-consistent (5 branches: all merged — B5 via the resolution loop below).
-Agents commit via `POST /api/branches/:name/commit` — the server never touches
-their working dirs, which is exactly the production path on Workers.
-
-### Resolving a tier-3 conflict
-
-A `needs-resolution` merge is not a dead end — it starts the resolution loop:
-
-1. Read the structured artifact: `GET /api/queue` (or `bl queue`) → the job
-   with `status: "needs-resolution"`; its `artifact.conflicts[]` holds
-   `{file, base, ours, theirs, ours_manifest, theirs_manifest,
-   overlapping_ranges}`. Raw `<<<<<<<` markers are never emitted.
-2. Decide the correct content — an agent reads both intent manifests to make
-   the call.
-3. `bl commit <branch> --repo <dir> -m "resolve: ..."` with the fixed files.
-   Branches in `needs-resolution` stay committable (only `merged` and
-   `abandoned` are terminal).
-4. `bl merge <branch>` again. If the resolution matches one side or merges
-   cleanly three-way, the re-merge lands at tier 1/2; if it still conflicts,
-   you get a fresh artifact and repeat from step 1.
-
-`scripts/demo.sh` performs the full loop on camera: the tier-3 conflict is
-read from the queue, resolved, committed, and re-merged to tier 2 in the
-same run.
+Assertions: correct tier per merge, no `<<<<<<<` anywhere, merged content
+present on `main`, D1 registry consistent (5 branches: 4 merged, 1
+needs-resolution).
 
 ## Tests
 
@@ -152,34 +105,25 @@ same run.
 npm test            # vitest: unit (core) + API integration (Hono app.request, temp git repo, D1 shim)
 ```
 
-87 tests green. `npx tsc --noEmit` clean in `packages/core`, `apps/api`, `apps/cli`.
+52 tests green. `npx tsc --noEmit` clean in `packages/core`, `apps/api`, `apps/cli`.
+
 ## Competition submission notes
 
 - Entry: **Branchline** — "Git rebuilt for parallel agents".
 - License: **Apache-2.0** (competition-compatible).
 - What's real: semantic branches + D1 registry, agent-readable JSON diffs,
-  agent commits via `POST /api/branches/:name/commit` (the CLI's
-  `bl commit` posts changed files; no shared filesystem needed),
-  deterministic 3-tier merge queue, Bearer-token auth guard,
-  server-rendered dashboard with a branch graph, full local test suite +
-  demo rehearsal, and the **Artifacts GitBackend**
-  (`apps/api/src/git/artifacts-git.ts`): reads go through the Artifacts
-  Workers binding, mutations clone into an in-memory filesystem and push
-  via isomorphic-git. Selected automatically when `ARTIFACTS` is bound.
+  deterministic 3-tier merge queue, Bitwarden-style token auth stub,
+  server-rendered dashboard, full local test suite + demo rehearsal.
 - What's stubbed (documented, not hidden): KV diff cache falls back to
-  in-memory; merge queue processes inline without a Queue binding;
-  `LocalGitBackend` is single-user dev only (one shared working checkout;
-  never production traffic). Honest note: the Artifacts backend is
-  implemented against the documented binding API but has not yet run
-  against live Artifacts credentials — binding shapes (`readTree`, `log`
-  entry fields) are handled defensively with a clone fallback for
-  `listFiles`. See `DEPLOY.md` for the production path and the exact
-  credentials needed.
+  in-memory; merge queue processes inline without a Queue binding; the
+  **Artifacts GitBackend is not implemented** — `LocalGitBackend` (git CLI
+  on a working repo) is the dev/test double behind the same interface.
+  See `DEPLOY.md` for the production path and the exact credentials needed.
 
 ## Layout
 
 ```
-apps/api/        Cloudflare Worker (Hono): routes, dashboard, GitBackends, D1 shim
+apps/api/        Cloudflare Worker (Hono): routes, dashboard, LocalGitBackend, D1 shim
 apps/cli/        bl CLI (citty): branch, commit, branches, diff, merge, queue
 packages/core/   pure logic: manifest schema, diff format, merge tiers
 schema/          D1 migrations (001_init, 002_merge_sha)

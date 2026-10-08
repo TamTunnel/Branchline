@@ -78,18 +78,17 @@ export function registerBranchesRoutes(
 
   app.get("/api/branches", async (c) => {
     const rows = await listBranches(db);
-    return c.json(
-      rows.map((r) => ({
+    // Envelope + flat summary shape: this is what `bl branches` consumes.
+    return c.json({
+      branches: rows.map((r) => ({
         name: r.name,
-        manifest: {
-          intent: r.intent,
-          agent_id: r.agent_id,
-          touches: safeParseTouches(r.touches),
-          base: r.base_sha,
-          status: r.status,
-          created_at: r.created_at,
-        },
+        agent_id: r.agent_id,
+        status: r.status,
+        intent: r.intent,
+        touches: safeParseTouches(r.touches),
+        base: r.base_sha,
+        created_at: r.created_at,
       })),
-    );
+    });
   });
 }
