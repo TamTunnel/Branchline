@@ -42,6 +42,38 @@ export interface ArtifactsBackendOptions {
 type TreeEntry = { path: string; type: string; oid: string };
 
 /**
+ * Normalize one raw readTree entry to {path, type, oid}.
+ * Real API shape: ArtifactsTreeEntry {name, mode, hash, type}.
+ */
+function normalizeEntry(e: {
+  name?: unknown;
+  path?: unknown;
+  hash?: unknown;
+  oid?: unknown;
+  sha?: unknown;
+  type?: unknown;
+  mode?: unknown;
+}): TreeEntry {
+  const path =
+    typeof e.name === "string" ? e.name : typeof e.path === "string" ? e.path : "";
+  const oid =
+    typeof e.hash === "string"
+      ? e.hash
+      : typeof e.oid === "string"
+        ? e.oid
+        : typeof e.sha === "string"
+          ? e.sha
+          : "";
+  // type is "blob" | "tree" in the real API; derive from mode as fallback.
+  let type = typeof e.type === "string" ? e.type : "";
+  if (!type && typeof e.mode === "string") {
+    type = e.mode === "40000" || e.mode === "040000" ? "tree" : "blob";
+  }
+  if (!path || !oid) throw new Error("unrecognized readTree entry shape");
+  return { path, type, oid };
+}
+
+/**
  * ArtifactsGitBackend — GitBackend over the Cloudflare Artifacts Workers
  * binding.
  *
@@ -159,6 +191,17 @@ export class ArtifactsGitBackend implements GitBackend {
       return this.cachedRemote;
     }
     const fromHandle = await this.withRepo(async (repo) => {
+      // Real API: repo.info() -> ArtifactsRepoInfo.remote (HTTPS git URL).
+      try {
+        const info = await (
+          repo as unknown as {
+            info?: () => Promise<{ remote?: unknown }>;
+          }
+        ).info?.();
+        if (info && typeof info.remote === "string") return info.remote;
+      } catch {
+        /* fall through to the property check */
+      }
       const maybe = repo as unknown as { remote?: unknown };
       return typeof maybe.remote === "string" ? maybe.remote : null;
     });
@@ -282,7 +325,8 @@ export class ArtifactsGitBackend implements GitBackend {
     try {
       return await this.withRepo(async (repo) => {
         const entries = await repo.log({ ref, limit: 1 });
-        const oid = entries?.[0]?.oid;
+        // Real API shape: ArtifactsCommitMetadata.hash (40-char SHA-1).
+        const oid = entries?.[0]?.hash ?? (entries?.[0] as { oid?: unknown })?.oid;
         if (!oid || typeof oid !== "string") {
           throw new Error(`no commit found for ref "${ref}"`);
         }
@@ -315,7 +359,10 @@ export class ArtifactsGitBackend implements GitBackend {
       const sha = await this.revParse(ref);
       return await this.withRepo(async (repo) => {
         const commit = await repo.readCommit(sha);
-        const treeOid = commit?.commit?.tree;
+        // Real API shape: ArtifactsCommitMetadata.treeHash.
+        const treeOid =
+          (commit as { treeHash?: unknown })?.treeHash ??
+          (commit as { commit?: { tree?: unknown } })?.commit?.tree;
         if (!treeOid || typeof treeOid !== "string") {
           throw new Error("readCommit returned no tree");
         }
@@ -601,14 +648,29 @@ export class ArtifactsGitBackend implements GitBackend {
 /** Accept the plausible readTree shapes; anything else is a hard error. */
 function normalizeTreeEntries(
   tree:
-    | { entries: Array<{ path: string; type: string; oid: string }> }
-    | { tree: Array<{ path: string; type: string; oid: string }> },
+    | Array<{
+        name?: unknown;
+        path?: unknown;
+        hash?: unknown;
+        oid?: unknown;
+        sha?: unknown;
+        type?: unknown;
+        mode?: unknown;
+      }>
+    | { entries: Array<Record<string, unknown>> }
+    | { tree: Array<Record<string, unknown>> },
 ): TreeEntry[] {
-  if (Array.isArray((tree as { entries?: unknown }).entries)) {
-    return (tree as { entries: TreeEntry[] }).entries;
+  const raw: Array<Record<string, unknown>> = Array.isArray(tree)
+    ? tree
+    : Array.isArray((tree as { entries?: unknown }).entries)
+      ? (tree as { entries: Array<Record<string, unknown>> }).entries
+      : Array.isArray((tree as { tree?: unknown }).tree)
+        ? (tree as { tree: Array<Record<string, unknown>> }).tree
+        : [];
+  if (raw.length === 0 && !Array.isArray(tree)) {
+    throw new Error("unrecognized readTree shape");
   }
-  if (Array.isArray((tree as { tree?: unknown }).tree)) {
-    return (tree as { tree: TreeEntry[] }).tree;
-  }
-  throw new Error("unrecognized readTree shape");
+  return raw.map((e) =>
+    normalizeEntry(e as Parameters<typeof normalizeEntry>[0]),
+  );
 }
