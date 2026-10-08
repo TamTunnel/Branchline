@@ -8,7 +8,7 @@ import {
   type Env,
   type GitBackend,
 } from "@branchline/core";
-import { insertBranch, listBranches, updateBranchStatus } from "../db.js";
+import { insertBranch, listBranches } from "../db.js";
 import { requireAuth } from "../auth.js";
 
 const CreateBranchBody = IntentManifestSchema.pick({
@@ -58,9 +58,11 @@ export function registerBranchesRoutes(
     const manifest = createManifest({ intent, agent_id, touches, base });
     const name = branchNameFor(agent_id, intent, base);
 
-    // Register in D1 FIRST so a git failure below can never orphan a branch:
-    // the row exists before any ref does, and the failure path marks it
-    // `abandoned` instead of leaving an untracked branch behind.
+    await backend.createBranch(name, base);
+    await backend.checkout(name);
+    await backend.writeFile(".branchline.json", manifestToJson(manifest) + "\n");
+    await backend.commitAll(`branchline: create ${name}`);
+
     await insertBranch(db, {
       name,
       intent,
@@ -71,48 +73,23 @@ export function registerBranchesRoutes(
       created_at: manifest.created_at,
     });
 
-    let branchCreated = false;
-    try {
-      await backend.createBranch(name, base);
-      // The ref is ours from here on; only delete it on failure paths below.
-      // (If createBranch itself throws, any pre-existing ref predates this
-      // request and must be left alone.)
-      branchCreated = true;
-      await backend.checkout(name);
-      await backend.writeFile(".branchline.json", manifestToJson(manifest) + "\n");
-      await backend.commitAll(`branchline: create ${name}`);
-    } catch (err) {
-      // No orphaned branches: the D1 row was inserted above, so mark it
-      // `abandoned`. (updateBranchStatus is a harmless no-op when the insert
-      // itself was what failed.)
-      await updateBranchStatus(db, name, "abandoned");
-      if (branchCreated) {
-        try {
-          await backend.deleteBranch(name);
-        } catch {
-          // Best effort: on Artifacts the ref may survive (no ref-deletion
-          // API), but the D1 row is the source of truth and says `abandoned`.
-        }
-      }
-      throw err;
-    }
-
     return c.json({ name, manifest }, 201);
   });
 
   app.get("/api/branches", async (c) => {
     const rows = await listBranches(db);
-    // Envelope + flat summary shape: this is what `bl branches` consumes.
-    return c.json({
-      branches: rows.map((r) => ({
+    return c.json(
+      rows.map((r) => ({
         name: r.name,
-        agent_id: r.agent_id,
-        status: r.status,
-        intent: r.intent,
-        touches: safeParseTouches(r.touches),
-        base: r.base_sha,
-        created_at: r.created_at,
+        manifest: {
+          intent: r.intent,
+          agent_id: r.agent_id,
+          touches: safeParseTouches(r.touches),
+          base: r.base_sha,
+          status: r.status,
+          created_at: r.created_at,
+        },
       })),
-    });
+    );
   });
 }

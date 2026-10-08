@@ -30,77 +30,6 @@ const CSS = `
   .empty { color: #777; font-style: italic; }
 `;
 
-const STATUS_COLORS: Record<string, string> = {
-  open: "#1a73e8",
-  merged: "#34a853",
-  "needs-resolution": "#f9ab00",
-  abandoned: "#9aa0a6",
-  failed: "#ea4335",
-  queued: "#9c27b0",
-};
-
-function statusColor(status: string): string {
-  return STATUS_COLORS[status] ?? "#555";
-}
-
-/**
- * Server-rendered branch graph: one row per branch, chronological,
- * on a shared spine. Dot color = status; each edge is labeled with the
- * base SHA the branch was cut from. No client JS.
- */
-function BranchGraph({ branches }: { branches: BranchRow[] }) {
-  if (branches.length === 0) {
-    return <p className="empty">No branches yet.</p>;
-  }
-  const ordered = [...branches].reverse(); // listBranches is newest-first
-  const rowH = 44;
-  const height = 40 + ordered.length * rowH;
-  const spineX = 30;
-  const labelX = 150;
-  return (
-    <svg
-      width="100%"
-      height={height}
-      viewBox={`0 0 900 ${height}`}
-      role="img"
-      aria-label="branch graph"
-      style="max-width: 900px; background: #fafafa; border: 1px solid #eee; border-radius: 6px;"
-    >
-      <line
-        x1={spineX}
-        y1={30}
-        x2={spineX}
-        y2={30 + (ordered.length - 1) * rowH}
-        stroke="#ccc"
-        stroke-width="2"
-      />
-      {ordered.map((b, i) => {
-        const y = 30 + i * rowH;
-        const color = statusColor(b.status);
-        return (
-          <g key={b.name}>
-            <circle cx={spineX} cy={y} r="7" fill={color} />
-            <line
-              x1={spineX + 7}
-              y1={y}
-              x2={labelX - 10}
-              y2={y}
-              stroke={color}
-              stroke-width="2"
-            />
-            <text x={labelX} y={y - 2} font-size="13" font-family="monospace">
-              {b.name}
-            </text>
-            <text x={labelX} y={y + 14} font-size="11" fill="#666">
-              {`${b.agent_id} · base ${b.base_sha.slice(0, 8)} · ${b.status}`}
-            </text>
-          </g>
-        );
-      })}
-    </svg>
-  );
-}
-
 /** Single server-rendered page. No client JS. */
 export const Dashboard: FC<DashboardProps> = (props) => {
   const { branches, merges } = props;
@@ -112,8 +41,6 @@ export const Dashboard: FC<DashboardProps> = (props) => {
       </head>
       <body>
         <h1>Branchline</h1>
-        <h2>Branch graph</h2>
-        <BranchGraph branches={branches} />
         <h2>Branches</h2>
         {branches.length === 0 ? (
           <p className="empty">No branches yet.</p>

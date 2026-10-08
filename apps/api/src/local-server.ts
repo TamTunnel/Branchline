@@ -20,7 +20,6 @@ const env: Env = {
   DB: new InMemoryDb(),
   REPO_PATH,
   BL_TOKEN: process.env.BL_TOKEN || undefined,
-  BL_ALLOW_ANON: process.env.BL_ALLOW_ANON || undefined,
 };
 
 const port = Number(process.env.PORT ?? 8787);

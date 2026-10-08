@@ -1,29 +1,26 @@
 import { Hono } from "hono";
 import type { Env } from "@branchline/core";
-import { createBackend } from "./git/local-git.js";
+import { LocalGitBackend } from "./git/local-git.js";
 import { listBranches, listMerges } from "./db.js";
 import { registerBranchesRoutes } from "./routes/branches.js";
-import { registerCommitRoutes } from "./routes/commits.js";
 import { registerDiffRoutes } from "./routes/diff.js";
-import { processMergeJob, registerMergeRoutes, type MergeJobMessage } from "./routes/merge.js";
+import { registerMergeRoutes } from "./routes/merge.js";
 import { registerQueueRoutes } from "./routes/queue.js";
 import { renderDashboard } from "./dashboard.js";
 
 /**
  * Build the Hono app.
  *
- * NOTE: createBackend selects ArtifactsGitBackend when the ARTIFACTS binding
- * is present (production on Workers) and LocalGitBackend otherwise (working
- * git repo at REPO_PATH: local dev / tests). LocalGitBackend shells out to
- * `git`, so it only runs where a working repo and the git binary exist.
- * Route code only depends on the GitBackend interface.
+ * NOTE: the LocalGitBackend shells out to `git` on REPO_PATH, so it only runs
+ * where a working repo and the git binary exist (local dev / self-hosted).
+ * A Cloudflare Artifacts backend would be wired here instead for the real
+ * Worker — the route code only depends on the GitBackend interface.
  */
 export function createApp(env: Env) {
-  const backend = createBackend(env);
+  const backend = new LocalGitBackend(env.REPO_PATH);
   const app = new Hono<{ Bindings: Env }>();
 
   registerBranchesRoutes(app, backend, env);
-  registerCommitRoutes(app, backend, env);
   registerDiffRoutes(app, backend, env);
   registerMergeRoutes(app, backend, env);
   registerQueueRoutes(app, env);
@@ -45,29 +42,5 @@ export function createApp(env: Env) {
 export default {
   async fetch(req: Request, env: Env) {
     return createApp(env).fetch(req, env);
-  },
-
-  /**
-   * Queue consumer for merge jobs (production path; local dev processes
-   * merges inline in POST /api/merge). Requires a working GitBackend —
-   * with the Artifacts backend this runs against env.ARTIFACTS; with the
-   * local backend it needs REPO_PATH, which only exists in dev.
-   */
-  async queue(
-    batch: { messages: Array<{ body: unknown; ack(): void }> },
-    env: Env,
-  ) {
-    const backend = createBackend(env);
-    for (const msg of batch.messages) {
-      const { branch, target, mergeId } = msg.body as MergeJobMessage;
-      try {
-        await processMergeJob(backend, env.DB, branch, target, mergeId);
-        msg.ack();
-      } catch {
-        // processMergeJob already marked the row failed; ack to avoid
-        // redelivery loops (retry via POST /api/merge).
-        msg.ack();
-      }
-    }
   },
 };
