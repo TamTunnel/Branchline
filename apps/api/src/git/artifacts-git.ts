@@ -297,8 +297,14 @@ export class ArtifactsGitBackend implements GitBackend {
     try {
       await this.revParse(name);
       return true;
-    } catch {
-      return false;
+    } catch (err) {
+      // Only the clean not-found signal maps to false. Transport errors,
+      // auth failures, and anything else propagate — a caller must never
+      // mistake an outage for a missing branch.
+      const msg = err instanceof Error ? err.message : String(err);
+      if (msg.includes("no commit found for ref") || msg.includes("NOT_FOUND"))
+        return false;
+      throw err;
     }
   }
 
@@ -486,8 +492,7 @@ export class ArtifactsGitBackend implements GitBackend {
     files: Record<string, string | null>,
     message: string,
   ): Promise<string> {
-    try {
-      await this.ensureOnBranch(this.currentBranch);
+    try {      await this.ensureOnBranch(this.currentBranch);
       for (const [path, content] of Object.entries(files)) {
         const rel = this.relPath(path);
         const abs = this.treePath(path);
@@ -520,6 +525,76 @@ export class ArtifactsGitBackend implements GitBackend {
     } catch (err) {
       this.fail("applyMerge", err);
     }
+  }
+
+  async deleteFile(path: string): Promise<void> {
+    // Guard first: no I/O (and no clone) happens for escaping paths.
+    const rel = this.relPath(path);
+    const abs = this.treePath(path);
+    try {
+      await this.ensureOnBranch(this.currentBranch);
+      try {
+        await git.remove({ fs: this.fs, dir: "/", filepath: rel });
+      } catch {
+        try {
+          await this.fs.promises.unlink(abs);
+        } catch {
+          /* already absent */
+        }
+      }
+    } catch (err) {
+      this.fail("deleteFile", err);
+    }
+  }
+
+  /**
+   * Atomic commit of a file set to `branch`: checkout, apply files,
+   * stage, commit, push. Each backend instance owns a private in-memory
+   * working copy and instances are per-request, so concurrent requests do
+   * not share mutable state here (unlike LocalGitBackend's one checkout).
+   */
+  async commitFiles(
+    branch: string,
+    files: Record<string, string | null>,
+    message: string,
+  ): Promise<string> {
+    try {
+      await this.ensureOnBranch(branch);
+      this.currentBranch = branch;
+      for (const [path, content] of Object.entries(files)) {
+        if (content === null) {
+          await this.deleteFile(path);
+        } else {
+          const abs = this.treePath(path);
+          const dir = abs.slice(0, abs.lastIndexOf("/")) || "/";
+          await this.fs.promises.mkdir(dir, { recursive: true });
+          await this.fs.promises.writeFile(abs, content);
+        }
+      }
+      const changed = await this.stageAll();
+      if (!changed) throw new Error("nothing to commit");
+      const sha = await git.commit({
+        fs: this.fs,
+        dir: "/",
+        message,
+        author: AUTHOR,
+      });
+      await this.pushCurrent();
+      return sha;
+    } catch (err) {
+      this.fail("commitFiles", err);
+    }
+  }
+
+  async deleteBranch(name: string): Promise<void> {
+    // The Artifacts binding exposes no ref-deletion operation and
+    // isomorphic-git cannot push a ref deletion, so a remote branch cannot
+    // be removed from here. The D1 row (marked `abandoned` by the caller)
+    // is the source of truth; the orphaned ref is harmless. Throwing —
+    // rather than silently succeeding — keeps the best-effort caller honest.
+    throw new Error(
+      `artifacts git deleteBranch failed: remote ref deletion is not supported for branch "${name}"`,
+    );
   }
 }
 

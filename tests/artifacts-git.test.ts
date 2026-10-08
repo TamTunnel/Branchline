@@ -289,6 +289,20 @@ describe("binding-backed reads", () => {
     );
   });
 
+  it("branchExists rethrows transport errors; false only for not-found", async () => {
+    const { backend } = makeBackend();
+    await expect(backend.branchExists("nope")).resolves.toBe(false);
+    const broken = new ArtifactsGitBackend({
+      artifacts: {
+        get: async () => {
+          throw new Error("boom: network down");
+        },
+      } as unknown as ArtifactsBinding,
+      repoName: "test-repo",
+    });
+    await expect(broken.branchExists("main")).rejects.toThrow("boom");
+  });
+
   it("readFile returns content or null", async () => {
     const { backend, repo } = makeBackend();
     repo.fileContent.set("main:a.txt", "hello");

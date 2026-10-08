@@ -13,8 +13,18 @@ function execFileAsync(
 ): Promise<{ stdout: string; stderr: string }> {
   return new Promise((resolvePromise, reject) => {
     execFile(file, args, options, (error, stdout, stderr) => {
-      if (error) reject(error);
-      else resolvePromise({ stdout, stderr });
+      if (error) {
+        // Node's execFile error does not carry stdout/stderr on the error
+        // object itself; attach them so callers can report git's output
+        // (git prints some failures, e.g. "nothing to commit", on stdout).
+        const enriched = error as Error & {
+          stdout?: string;
+          stderr?: string;
+        };
+        enriched.stdout = stdout;
+        enriched.stderr = stderr;
+        reject(enriched);
+      } else resolvePromise({ stdout, stderr });
     });
   });
 }
@@ -29,6 +39,29 @@ function execFileAsync(
 export class LocalGitBackend implements GitBackend {
   constructor(private readonly repoPath: string) {}
 
+  /**
+   * Serializes multi-step mutations (commitFiles, and the createBranch
+   * sequence in the routes) that share this one working checkout. Without
+   * it, two concurrent requests could interleave checkout/write/commit and
+   * land files on the wrong branch. Single-process only: this is the
+   * "local backend = single-user dev" caveat, documented in README/DEPLOY.
+   */
+  private mutex: Promise<void> = Promise.resolve();
+
+  private async locked<T>(fn: () => Promise<T>): Promise<T> {
+    const prev = this.mutex;
+    let release: () => void = () => {};
+    this.mutex = new Promise<void>((r) => {
+      release = r;
+    });
+    await prev;
+    try {
+      return await fn();
+    } finally {
+      release();
+    }
+  }
+
   private async git(args: string[]): Promise<string> {
     try {
       const { stdout } = await execFileAsync("git", args, {
@@ -36,14 +69,19 @@ export class LocalGitBackend implements GitBackend {
       });
       return stdout.trim();
     } catch (err) {
-      const stderr =
+      // execFile errors carry stdout/stderr properties; git reports some
+      // failures (e.g. "nothing to commit") on stdout, so include both.
+      const detail =
         err instanceof Error
-          ? // execFile errors carry stdout/stderr properties
-            String(
-              (err as unknown as { stderr?: unknown }).stderr ?? err.message,
-            ).trim()
+          ? [
+              (err as unknown as { stderr?: unknown }).stderr,
+              (err as unknown as { stdout?: unknown }).stdout,
+            ]
+              .map((s) => String(s ?? "").trim())
+              .filter((s) => s.length > 0)
+              .join("\n") || err.message
           : String(err);
-      throw new Error(`git ${args.join(" ")} failed: ${stderr}`);
+      throw new Error(`git ${args.join(" ")} failed: ${detail.trim()}`);
     }
   }
 
@@ -99,10 +137,55 @@ export class LocalGitBackend implements GitBackend {
     await fsWriteFile(abs, content);
   }
 
+  async deleteFile(path: string): Promise<void> {
+    const abs = this.treePath(path);
+    try {
+      await this.git(["rm", "-q", "--", path]);
+    } catch {
+      // Untracked or already gone: remove from the working tree directly.
+      try {
+        await unlink(abs);
+      } catch {
+        /* already absent */
+      }
+    }
+  }
+
   async commitAll(message: string): Promise<string> {
     await this.git(["add", "-A"]);
     await this.git([...AUTHOR, "commit", "-m", message]);
     return this.git(["rev-parse", "HEAD"]);
+  }
+
+  /**
+   * Atomic commit of a file set to `branch`. The whole
+   * checkout -> write -> commit sequence holds the backend mutex so
+   * concurrent commitFiles calls cannot interleave on the shared checkout.
+   */
+  async commitFiles(
+    branch: string,
+    files: Record<string, string | null>,
+    message: string,
+  ): Promise<string> {
+    return this.locked(async () => {
+      await this.checkout(branch);
+      for (const [path, content] of Object.entries(files)) {
+        if (content === null) await this.deleteFile(path);
+        else await this.writeFile(path, content);
+      }
+      return this.commitAll(message);
+    });
+  }
+
+  async deleteBranch(name: string): Promise<void> {
+    // Cannot delete the checked-out branch: detach HEAD first (best effort;
+    // the merge route re-checkouts its target before mutating anyway).
+    try {
+      await this.git(["checkout", "-q", "--detach", "HEAD"]);
+    } catch {
+      /* ignore */
+    }
+    await this.git(["branch", "-D", name]);
   }
 
   async mergeBranch(branch: string, message: string): Promise<string> {

@@ -10,8 +10,8 @@ credentials exist in this environment.
 1. **Cloudflare account access** — one of:
    - `wrangler login` (OAuth, interactive), or
    - a Cloudflare **API token** with permissions: Workers Scripts (edit),
-     D1 (edit), KV (edit), Queues (edit). (`CLOUDFLARE_API_TOKEN` env var;
-     also needs the **Account ID**.)
+     D1 (edit), KV (edit), Queues (edit), **Artifacts (edit)**.
+     (`CLOUDFLARE_API_TOKEN` env var; also needs the **Account ID**.)
 2. **An Artifacts namespace + repo for the git backend**:
    - Create the namespace (dashboard or API), then create the repo, e.g.
      via the setup prompt in the [Artifacts
@@ -102,14 +102,48 @@ environment): the binding call shapes (`log` entry fields, `readTree`
 entry fields, `readBlob`, `createToken` response) are implemented from the
 docs and handled defensively, but the mutation path (clone/push against a
 real Artifacts remote) has not been exercised end-to-end. The first deploy
-should run the demo script against the deployed worker and watch for
+should run the curl smoke test above and watch for
 `artifacts git <op> failed` errors, which name the exact failing primitive.
 
 ## What works the day it deploys (D1 + Queues + Artifacts bound)
 
-- Branch registry API + dashboard
-- Full git backend: semantic branches, JSON diffs, 3-tier merge queue —
+- Branch registry API + dashboard (now with a branch graph)
+- Full git backend: semantic branches, agent commits via
+  `POST /api/branches/:name/commit`, JSON diffs, 3-tier merge queue —
   the queue consumer processes jobs against the Artifacts repo
-- First-deploy smoke test: run the demo script (`npm run demo`) against
-  the deployed worker URL and confirm merges land; check logs for
-  `artifacts git <op> failed` (names the exact failing primitive)
+- First-deploy smoke test (curl against the deployed worker URL;
+  `scripts/demo.sh` only drives a LOCAL server, it cannot target a deploy):
+
+```bash
+BASE=https://branchline.<your-subdomain>.workers.dev
+TOKEN=<the BL_TOKEN you set>   # omit -H if BL_TOKEN is unset
+H=(-H "Authorization: Bearer $TOKEN" -H "content-type: application/json")
+
+# 1. create a branch
+curl -s "${H[@]}" -X POST $BASE/api/branches \
+  -d '{"intent":"smoke test","agent_id":"smoke","touches":["smoke/**"]}'
+# -> {"name":"bl/smoke-smoke-test-<hash>", ...}; save as $BR
+
+# 2. commit a file to it through the API (no git needed client-side)
+curl -s "${H[@]}" -X POST $BASE/api/branches/$BR/commit \
+  -d '{"files":{"smoke/hello.txt":"hello from the smoke test\n"},"message":"smoke: hello"}'
+# -> {"sha":"..."} 201
+
+# 3. diff + merge + queue
+curl -s "$BASE/api/diff?from=main&to=$BR"
+curl -s "${H[@]}" -X POST $BASE/api/merge -d "{\"branch\":\"$BR\"}"
+curl -s "$BASE/api/queue"
+curl -s "$BASE/" | grep -o "<title>Branchline</title>"
+```
+
+Then check `wrangler tail` for `artifacts git <op> failed` (names the exact
+failing primitive).
+
+## Local backend: single-user dev only
+
+`LocalGitBackend` (`apps/api/src/git/local-git.ts`) shells out to the git
+binary against ONE working repo at `REPO_PATH`. Multi-step mutations on one
+branch are serialized with an in-process mutex, but concurrent requests
+against it are still dev-only territory — never point production traffic at
+it. Production is the Artifacts backend, where every request gets its own
+isolated in-memory working copy.

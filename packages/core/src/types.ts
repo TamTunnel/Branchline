@@ -87,6 +87,12 @@ export interface GitBackend {
   branchExists(name: string): Promise<boolean>;
   /** Create branch `name` at `base` ref. */
   createBranch(name: string, base: string): Promise<void>;
+  /**
+   * Delete branch `name`. Best-effort cleanup for failed branch creation:
+   * implementations may leave the ref behind when the platform cannot
+   * delete it (callers must tolerate that; D1 is the source of truth).
+   */
+  deleteBranch(name: string): Promise<void>;
   /** List file paths present at `ref`. */
   listFiles(ref: string): Promise<string[]>;
   /** Read file content at `ref:path`. Null when the file does not exist. */
@@ -95,8 +101,26 @@ export interface GitBackend {
   checkout(branch: string): Promise<void>;
   /** Write (create or overwrite) a file in the working tree. Does not commit. */
   writeFile(path: string, content: string): Promise<void>;
+  /** Delete a file from the working tree. Does not commit. */
+  deleteFile(path: string): Promise<void>;
   /** Stage everything and commit on the currently checked-out branch. Returns SHA. */
   commitAll(message: string): Promise<string>;
+  /**
+   * Commit a set of file changes to `branch` as one operation:
+   * check out `branch`, apply `files` (path -> content; null deletes),
+   * stage all, commit. Returns the new HEAD SHA.
+   *
+   * This is the atomic multi-step mutation: implementations must serialize
+   * concurrent commitFiles calls against each other (LocalGitBackend shares
+   * one working checkout; ArtifactsGitBackend is stateless per instance but
+   * must still not interleave within an instance). Throws when there is
+   * nothing to commit.
+   */
+  commitFiles(
+    branch: string,
+    files: Record<string, string | null>,
+    message: string,
+  ): Promise<string>;
   /**
    * Merge `branch` into the currently checked-out branch.
    * Tier 1: fast-forward when possible, else --no-ff merge commit.

@@ -18,6 +18,7 @@ const MARKER = "<<<<<<<";
 
 let tmp: string;
 let base0: string;
+let db: InMemoryDb;
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 let app: any;
 
@@ -106,6 +107,7 @@ beforeAll(() => {
   base0 = git("rev-parse", "HEAD");
 
   const env = { DB: new InMemoryDb(), REPO_PATH: tmp };
+  db = env.DB;
   app = createApp(env);
 });
 
@@ -295,6 +297,156 @@ describe("queue + dashboard + errors", () => {
       body: JSON.stringify({ intent: "x", agent_id: "y", touches: ["z"] }),
     });
     expect(wrong.status).toBe(401);
+  });
+});
+
+describe("commit endpoint", () => {
+  it("POST /api/branches/:name/commit commits files via the API", async () => {
+    const name = await createBranch("api commit", "agent-c", ["src/c/**"], base0);
+    const res = await post(
+      `/api/branches/${encodeURIComponent(name)}/commit`,
+      {
+        files: { "src/c/via-api.txt": "hello via api\n" },
+        message: "agent-c: via api",
+      },
+    );
+    expect(res.status).toBe(201);
+    const { sha } = await res.json();
+    expect(sha).toMatch(/^[0-9a-f]{40}$/);
+    // The file landed on the branch in git; the manifest is untouched.
+    expect(git("show", `${name}:src/c/via-api.txt`).trim()).toBe(
+      "hello via api",
+    );
+    expect(git("show", `${name}:.branchline.json`)).toContain("agent-c");
+  });
+
+  it("supports deletion with null content", async () => {
+    const name = await createBranch("api delete", "agent-c", ["src/d/**"], base0);
+    await postJson(`/api/branches/${encodeURIComponent(name)}/commit`, {
+      files: { "src/d/gone.txt": "temporary\n" },
+      message: "agent-c: add temp",
+    });
+    const res = await post(
+      `/api/branches/${encodeURIComponent(name)}/commit`,
+      {
+        files: { "src/d/gone.txt": null },
+        message: "agent-c: delete temp",
+      },
+    );
+    expect(res.status).toBe(201);
+    expect(() => git("show", `${name}:src/d/gone.txt`)).toThrow();
+  });
+
+  it("404s on an unknown branch", async () => {
+    const res = await post("/api/branches/bl%2Fnope/commit", {
+      files: { "x.txt": "x" },
+      message: "m",
+    });
+    expect(res.status).toBe(404);
+  });
+
+  it("409s on a non-open branch", async () => {
+    const name = await createBranch("close me", "agent-c", ["src/e/**"], base0);
+    await postJson(`/api/branches/${encodeURIComponent(name)}/commit`, {
+      files: { "src/e/f.txt": "f\n" },
+      message: "agent-c: f",
+    });
+    const d = await mergeBranch(name);
+    expect(d.status).toBe("merged");
+    const res = await post(
+      `/api/branches/${encodeURIComponent(name)}/commit`,
+      {
+        files: { "src/e/g.txt": "g" },
+        message: "agent-c: g",
+      },
+    );
+    expect(res.status).toBe(409);
+  });
+
+  it("400s on empty files, 422 when nothing changed, 400 on path traversal", async () => {
+    const name = await createBranch("api edge", "agent-c", ["src/f/**"], base0);
+    const enc = encodeURIComponent(name);
+    let res = await post(`/api/branches/${enc}/commit`, {
+      files: {},
+      message: "m",
+    });
+    expect(res.status).toBe(400);
+
+    await postJson(`/api/branches/${enc}/commit`, {
+      files: { "src/f/a.txt": "a\n" },
+      message: "agent-c: a",
+    });
+    res = await post(`/api/branches/${enc}/commit`, {
+      files: { "src/f/a.txt": "a\n" },
+      message: "agent-c: a again",
+    });
+    expect(res.status).toBe(422);
+
+    res = await post(`/api/branches/${enc}/commit`, {
+      files: { "../evil.txt": "x" },
+      message: "m",
+    });
+    expect(res.status).toBe(400);
+  });
+
+  it("401s when BL_TOKEN is set and no token is sent", async () => {
+    const guarded = createApp({
+      DB: new InMemoryDb(),
+      REPO_PATH: tmp,
+      BL_TOKEN: "s3cret",
+    });
+    const res = await guarded.request("/api/branches/bl%2Fx/commit", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ files: { x: "y" }, message: "m" }),
+    });
+    expect(res.status).toBe(401);
+  });
+});
+
+describe("diff cache", () => {
+  it("keys on resolved SHAs: advancing main changes the diff (no stale hit)", async () => {
+    const name = await createBranch("cache test", "agent-c", ["src/g/**"], base0);
+    const enc = encodeURIComponent(name);
+    const first = await (
+      await app.request(`/api/diff?from=main&to=${enc}`)
+    ).json();
+    // Advance main directly, bypassing the API.
+    git("checkout", "-q", "main");
+    write("src/main-advance.txt", "advance\n");
+    commit("test: advance main");
+    const second = await (
+      await app.request(`/api/diff?from=main&to=${enc}`)
+    ).json();
+    expect(JSON.stringify(second)).not.toBe(JSON.stringify(first));
+    expect(
+      (second as Array<{ file: string }>).some(
+        (o) => o.file === "src/main-advance.txt",
+      ),
+    ).toBe(true);
+  });
+});
+
+describe("queue robustness", () => {
+  it("degrades a malformed artifact to null instead of 500", async () => {
+    const name = await createBranch("bad artifact", "agent-c", ["src/h/**"], base0);
+    await postJson(`/api/branches/${encodeURIComponent(name)}/commit`, {
+      files: { "src/h/x.txt": "x\n" },
+      message: "agent-c: x",
+    });
+    const d = await mergeBranch(name);
+    expect(d.status).toBe("merged");
+    const { queue } = await (await app.request("/api/queue")).json();
+    const job = queue.find((j: { branch: string }) => j.branch === name);
+    expect(job).toBeDefined();
+    await db
+      .prepare("UPDATE merges SET artifact = ? WHERE id = ?")
+      .bind("{{{not json", job.id)
+      .run();
+    const res = await app.request("/api/queue");
+    expect(res.status).toBe(200);
+    const { queue: q2 } = await res.json();
+    expect(q2.find((j: { id: number }) => j.id === job.id).artifact).toBeNull();
   });
 });
 

@@ -2,8 +2,10 @@
 /**
  * `bl` — the Branchline CLI.
  *
- * Thin citty wrapper over the Branchline HTTP API (apps/api), plus a local
- * `bl commit` helper that stages and commits through the system git binary.
+ * Thin citty wrapper over the Branchline HTTP API (apps/api). `bl commit`
+ * collects the working dir's changed files and POSTs them to
+ * POST /api/branches/:name/commit — the CLI never touches the server's git
+ * working copy, so agents can commit from any machine.
  *
  * Global options (also readable from env):
  *   --api <url>     API base URL. Default: $BL_API or http://127.0.0.1:8787
@@ -13,6 +15,8 @@
  * the subcommand name (e.g. `bl branch --api <url> ...`), or set via env.
  */
 import { spawnSync } from "node:child_process";
+import { readFileSync, readdirSync, statSync } from "node:fs";
+import { join, relative } from "node:path";
 import { defineCommand, runMain } from "citty";
 import type { ConflictArtifact, FileOp } from "@branchline/core";
 
@@ -166,13 +170,89 @@ const branchCmd = defineCommand({
 // ---------------------------------------------------------------------------
 // bl commit
 // ---------------------------------------------------------------------------
+
+/** True when `dir` is inside a git working tree. */
+function isGitRepo(dir: string): boolean {
+  const r = spawnSync("git", ["-C", dir, "rev-parse", "--is-inside-work-tree"], {
+    stdio: "pipe",
+  });
+  return r.status === 0;
+}
+
+/** Read a file as UTF-8; fail loudly on binary content (not API-safe). */
+function readTextFile(abs: string, rel: string): string {
+  const buf = readFileSync(abs);
+  if (buf.includes(0)) {
+    fail(
+      `binary file not supported by bl commit: ${rel} (commit it with git directly)`,
+    );
+  }
+  return buf.toString("utf8");
+}
+
+/**
+ * Collect the files `bl commit` will send, as path -> content (null deletes).
+ * In a git repo: the porcelain status (added/modified/renamed/untracked and
+ * deletions). Otherwise: a full snapshot of the directory, excluding .git/.
+ * Paths are always repo-relative with forward slashes.
+ */
+function collectChangedFiles(dir: string): Record<string, string | null> {
+  const files: Record<string, string | null> = {};
+  if (isGitRepo(dir)) {
+    const r = spawnSync("git", ["-C", dir, "status", "--porcelain=v1"], {
+      encoding: "utf8",
+    });
+    if (r.status !== 0) fail(`git status failed in ${dir}`);
+    for (const line of (r.stdout as string).split("\n")) {
+      if (!line.trim()) continue;
+      const code = line.slice(0, 2);
+      const rest = line.slice(3);
+      const staged = code[0];
+      const workdir = code[1];
+      const changed = staged !== " " && staged !== "?" ? staged : workdir;
+      if (rest.includes(" -> ")) {
+        // Rename: "R  old -> new".
+        const [oldPath, newPath] = rest.split(" -> ");
+        files[oldPath] = null;
+        files[newPath] = readTextFile(join(dir, newPath), newPath);
+        continue;
+      }
+      const path = rest;
+      if (changed === "D") {
+        files[path] = null;
+      } else {
+        // M, A, T, ?? (untracked), etc: send current content.
+        files[path] = readTextFile(join(dir, path), path);
+      }
+    }
+    return files;
+  }
+  // Not a git repo: full snapshot, skipping .git/.
+  const walk = (abs: string): void => {
+    for (const entry of readdirSync(abs)) {
+      const full = join(abs, entry);
+      const rel = relative(dir, full).split("\\").join("/");
+      if (rel === ".git" || rel.startsWith(".git/")) continue;
+      if (statSync(full).isDirectory()) walk(full);
+      else files[rel] = readTextFile(full, rel);
+    }
+  };
+  walk(dir);
+  return files;
+}
+
 const commitCmd = defineCommand({
   meta: {
     name: "commit",
     description:
-      "Stage all changes and commit via git (the documented way agents commit on a branchline branch)",
+      "Commit the working dir's changes to a branchline branch via the API (no shared filesystem needed)",
   },
   args: {
+    branch: {
+      type: "positional",
+      required: true,
+      description: "Branch to commit to (must be open)",
+    },
     message: {
       type: "string",
       alias: "m",
@@ -181,18 +261,24 @@ const commitCmd = defineCommand({
     },
     repo: {
       type: "string",
-      description: "Repo path (default: current directory)",
+      description: "Working dir holding the agent's changes (default: current directory)",
     },
+    ...globalArgs,
   },
-  run({ args }) {
-    const repo = args.repo || process.cwd();
-    // stdio: inherit so the user sees git's own output.
-    const add = spawnSync("git", ["-C", repo, "add", "-A"], { stdio: "inherit" });
-    if (add.status !== 0) process.exit(add.status ?? 1);
-    const commit = spawnSync("git", ["-C", repo, "commit", "-m", args.message], {
-      stdio: "inherit",
-    });
-    if (commit.status !== 0) process.exit(commit.status ?? 1);
+  async run({ args }) {
+    const g = globals(args);
+    const dir = args.repo || process.cwd();
+    const files = collectChangedFiles(dir);
+    if (Object.keys(files).length === 0) {
+      fail("nothing to commit: no changes found");
+    }
+    const res = await apiFetch<{ sha: string }>(
+      "POST",
+      g,
+      `/api/branches/${encodeURIComponent(args.branch)}/commit`,
+      { files, message: args.message },
+    );
+    console.log(`committed ${res.sha}`);
   },
 });
 

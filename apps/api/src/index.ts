@@ -3,6 +3,7 @@ import type { Env } from "@branchline/core";
 import { createBackend } from "./git/local-git.js";
 import { listBranches, listMerges } from "./db.js";
 import { registerBranchesRoutes } from "./routes/branches.js";
+import { registerCommitRoutes } from "./routes/commits.js";
 import { registerDiffRoutes } from "./routes/diff.js";
 import { processMergeJob, registerMergeRoutes, type MergeJobMessage } from "./routes/merge.js";
 import { registerQueueRoutes } from "./routes/queue.js";
@@ -22,6 +23,7 @@ export function createApp(env: Env) {
   const app = new Hono<{ Bindings: Env }>();
 
   registerBranchesRoutes(app, backend, env);
+  registerCommitRoutes(app, backend, env);
   registerDiffRoutes(app, backend, env);
   registerMergeRoutes(app, backend, env);
   registerQueueRoutes(app, env);
