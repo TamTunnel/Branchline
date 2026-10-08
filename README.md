@@ -37,7 +37,8 @@ Built for the Cloudflare **"Build the next Git platform"** competition
                                    ┌────────▼─────────┐
                                    │ LocalGitBackend  │  (dev/test:
                                    │ (git CLI)        │   working repo)
-                                   │ ArtifactsBackend │  (future: prod)
+                                   │ ArtifactsBackend │  (prod: Workers
+                                   │ (isomorphic-git) │   + Artifacts)
                                    └──────────────────┘
 
   packages/core — pure logic, no I/O:
@@ -112,17 +113,23 @@ npm test            # vitest: unit (core) + API integration (Hono app.request, t
 - License: **Apache-2.0** (competition-compatible).
 - What's real: semantic branches + D1 registry, agent-readable JSON diffs,
   deterministic 3-tier merge queue, Bearer-token auth stub,
-  server-rendered dashboard, full local test suite + demo rehearsal.
+  server-rendered dashboard, full local test suite + demo rehearsal, and
+  the **Artifacts GitBackend** (`apps/api/src/git/artifacts-git.ts`):
+  reads go through the Artifacts Workers binding, mutations clone into an
+  in-memory filesystem and push via isomorphic-git. Selected automatically
+  when `ARTIFACTS` is bound.
 - What's stubbed (documented, not hidden): KV diff cache falls back to
-  in-memory; merge queue processes inline without a Queue binding; the
-  **Artifacts GitBackend is not implemented** — `LocalGitBackend` (git CLI
-  on a working repo) is the dev/test double behind the same interface.
-  See `DEPLOY.md` for the production path and the exact credentials needed.
+  in-memory; merge queue processes inline without a Queue binding.
+  Honest note: the Artifacts backend is implemented against the documented
+  binding API but has not yet run against live Artifacts credentials —
+  binding shapes (`readTree`, `log` entry fields) are handled defensively
+  with a clone fallback for `listFiles`. See `DEPLOY.md` for the
+  production path and the exact credentials needed.
 
 ## Layout
 
 ```
-apps/api/        Cloudflare Worker (Hono): routes, dashboard, LocalGitBackend, D1 shim
+apps/api/        Cloudflare Worker (Hono): routes, dashboard, GitBackends, D1 shim
 apps/cli/        bl CLI (citty): branch, commit, branches, diff, merge, queue
 packages/core/   pure logic: manifest schema, diff format, merge tiers
 schema/          D1 migrations (001_init, 002_merge_sha)
