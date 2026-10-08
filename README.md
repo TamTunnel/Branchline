@@ -84,10 +84,25 @@ $BL commit bl/agent-1-add-oauth-login-<hash> --repo /tmp/agent-1 -m "agent-1: ad
 
 Useful env vars: `BL_API` (API base URL, default `http://127.0.0.1:8787`),
 `BL_TOKEN` (repo-scoped token; also set server-side to require auth).
+In production (the `ARTIFACTS` binding is present) the server **fails closed**:
+mutating routes return `503` unless `BL_TOKEN` is set. `BL_ALLOW_ANON=1`
+opts back into open mode — local dev only, never production.
+
+Notes:
+
+- `bl commit` accepts `--expected-sha <sha>` for optimistic concurrency: the
+  commit is refused with 409 if the branch moved since. Without it,
+  concurrent commits to one branch are last-writer-wins.
+- Branch names contain slashes (e.g. `bl/agent-1-add-oauth-login-a1b2c3-d4e5`);
+  URL-encode them in raw curl calls — the `bl` CLI handles this for you.
+- D1 is the manifest source of truth; hand edits to `.branchline.json` in
+  the repo are overwritten at merge time.
 
 ## The demo rehearsal
 
 `scripts/demo.sh` is the competition-video rehearsal — 4 simulated agents
+(simulated shell processes driving the production API concurrently;
+stand-ins for real AI coding agents, which would use the same `bl` commands)
 cut from the same base, working **concurrently** (parallel file writes +
 API commits from isolated working dirs), then sequential merges across all
 three tiers:
@@ -106,9 +121,30 @@ bash scripts/demo.sh   # spins up API + repo, asserts every tier, prints DEMO PA
 
 Assertions: all 5 branches cut from the same base SHA, correct tier per
 merge, no `<<<<<<<` anywhere, merged content present on `main`, D1 registry
-consistent (5 branches: 4 merged, 1 needs-resolution). Agents commit via
-`POST /api/branches/:name/commit` — the server never touches their working
-dirs, which is exactly the production path on Workers.
+consistent (5 branches: all merged — B5 via the resolution loop below).
+Agents commit via `POST /api/branches/:name/commit` — the server never touches
+their working dirs, which is exactly the production path on Workers.
+
+### Resolving a tier-3 conflict
+
+A `needs-resolution` merge is not a dead end — it starts the resolution loop:
+
+1. Read the structured artifact: `GET /api/queue` (or `bl queue`) → the job
+   with `status: "needs-resolution"`; its `artifact.conflicts[]` holds
+   `{file, base, ours, theirs, ours_manifest, theirs_manifest,
+   overlapping_ranges}`. Raw `<<<<<<<` markers are never emitted.
+2. Decide the correct content — an agent reads both intent manifests to make
+   the call.
+3. `bl commit <branch> --repo <dir> -m "resolve: ..."` with the fixed files.
+   Branches in `needs-resolution` stay committable (only `merged` and
+   `abandoned` are terminal).
+4. `bl merge <branch>` again. If the resolution matches one side or merges
+   cleanly three-way, the re-merge lands at tier 1/2; if it still conflicts,
+   you get a fresh artifact and repeat from step 1.
+
+`scripts/demo.sh` performs the full loop on camera: the tier-3 conflict is
+read from the queue, resolved, committed, and re-merged to tier 2 in the
+same run.
 
 ## Tests
 
@@ -116,7 +152,7 @@ dirs, which is exactly the production path on Workers.
 npm test            # vitest: unit (core) + API integration (Hono app.request, temp git repo, D1 shim)
 ```
 
-78 tests green. `npx tsc --noEmit` clean in `packages/core`, `apps/api`, `apps/cli`.
+87 tests green. `npx tsc --noEmit` clean in `packages/core`, `apps/api`, `apps/cli`.
 ## Competition submission notes
 
 - Entry: **Branchline** — "Git rebuilt for parallel agents".

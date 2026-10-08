@@ -263,6 +263,10 @@ const commitCmd = defineCommand({
       type: "string",
       description: "Working dir holding the agent's changes (default: current directory)",
     },
+    expectedSha: {
+      type: "string",
+      description: "Only commit if the branch is still at this sha (409 otherwise; omit for last-writer-wins)",
+    },
     ...globalArgs,
   },
   async run({ args }) {
@@ -276,7 +280,11 @@ const commitCmd = defineCommand({
       "POST",
       g,
       `/api/branches/${encodeURIComponent(args.branch)}/commit`,
-      { files, message: args.message },
+      {
+        files,
+        message: args.message,
+        ...(args.expectedSha ? { expected_sha: args.expectedSha } : {}),
+      },
     );
     console.log(`committed ${res.sha}`);
   },

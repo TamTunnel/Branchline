@@ -8,6 +8,13 @@ const CommitBody = z.object({
   /** path -> content; null deletes the file. */
   files: z.record(z.string(), z.union([z.string(), z.null()])),
   message: z.string().min(1).max(500),
+  /**
+   * Optional optimistic-concurrency guard: the sha the caller based its
+   * file collection on. When supplied and != the branch's current sha,
+   * the commit is refused with 409. Best-effort (check-then-act); without
+   * it, concurrent commits to one branch are last-writer-wins.
+   */
+  expected_sha: z.string().optional(),
 });
 
 /**
@@ -31,9 +38,12 @@ export function registerCommitRoutes(
     const name = c.req.param("name");
     const row = await getBranch(env.DB, name);
     if (!row) return c.json({ error: `branch not found: ${name}` }, 404);
-    if (row.status !== "open") {
+    // A branch awaiting resolution is still live: resolving a tier-3
+    // conflict means committing the fix to the SAME branch and merging
+    // again. Only terminal states (merged/abandoned) refuse new commits.
+    if (row.status !== "open" && row.status !== "needs-resolution") {
       return c.json(
-        { error: `branch is ${row.status}, not open; refusing to commit` },
+        { error: `branch is ${row.status}; refusing to commit` },
         409,
       );
     }
@@ -45,12 +55,21 @@ export function registerCommitRoutes(
         400,
       );
     }
-    const { files, message } = parsed.data;
+    const { files, message, expected_sha } = parsed.data;
     if (Object.keys(files).length === 0) {
       return c.json({ error: "files must not be empty" }, 400);
     }
     if (Object.keys(files).length > 500) {
       return c.json({ error: "too many files in one commit (max 500)" }, 413);
+    }
+    if (expected_sha) {
+      const current = await backend.revParse(name);
+      if (current !== expected_sha) {
+        return c.json(
+          { error: `branch moved: expected ${expected_sha}, is ${current}` },
+          409,
+        );
+      }
     }
 
     try {
