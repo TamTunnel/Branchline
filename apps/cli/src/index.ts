@@ -371,22 +371,71 @@ const mergeCmd = defineCommand({
   },
   async run({ args }) {
     const g = globals(args);
-    const res = await apiFetch<MergeResult>("POST", g, "/api/merge", {
-      branch: args.branch,
-      target: args.target,
-    });
-    console.log(`tier=${res.tier} status=${res.status}`);
-    console.log(`merged ${res.merged_files.length} file(s)`);
-    if (res.status === "needs-resolution") {
-      for (const c of res.conflicts) {
+    const res = await apiFetch<MergeResult & { id?: number }>(
+      "POST",
+      g,
+      "/api/merge",
+      {
+        branch: args.branch,
+        target: args.target,
+      },
+    );
+    // Production (queue bound): 202-queued. Poll the job row until the
+    // consumer sets a tier. Local dev: the result comes back inline.
+    let r = res;
+    if (r.status === "queued" && r.id !== undefined) {
+      const job = await pollQueueJob(g, r.id);
+      r = {
+        tier: job.tier,
+        status: job.status,
+        merged_files: [],
+        conflicts: job.artifact?.conflicts ?? [],
+        merge_sha: job.merge_sha ?? undefined,
+      };
+    }
+    console.log(`tier=${r.tier} status=${r.status}`);
+    if (r.merged_files && r.merged_files.length > 0)
+      console.log(`merged ${r.merged_files.length} file(s)`);
+    if (r.status === "needs-resolution") {
+      for (const c of r.conflicts) {
         // Paths + ranges only — never raw file contents with conflict markers.
         const ranges = c.overlapping_ranges.map(([a, b]) => `${a}-${b}`).join(", ");
         console.log(`conflict: ${c.file} overlapping ranges: ${ranges}`);
       }
     }
-    if (res.merge_sha) console.log(`merge_sha=${res.merge_sha}`);
+    if (r.merge_sha) console.log(`merge_sha=${r.merge_sha}`);
   },
 });
+
+/** Poll /api/queue until job `id` has a tier (consumer finished). */
+async function pollQueueJob(
+  g: GlobalOpts,
+  id: number,
+): Promise<{
+  tier: number;
+  status: string;
+  merge_sha: string | null;
+  artifact: { conflicts?: ConflictArtifact[] } | null;
+}> {
+  for (let i = 0; i < 60; i++) {
+    const q = await apiFetch<{ queue: Array<{
+      id: number;
+      tier: number | null;
+      status: string;
+      merge_sha: string | null;
+      artifact: { conflicts?: ConflictArtifact[] } | null;
+    }> }>("GET", g, "/api/queue?limit=200");
+    const job = q.queue.find((j) => j.id === id);
+    if (job && job.tier !== null && job.tier !== undefined) return job as {
+      tier: number;
+      status: string;
+      merge_sha: string | null;
+      artifact: { conflicts?: ConflictArtifact[] } | null;
+    };
+    await new Promise((r) => setTimeout(r, 1000));
+  }
+  throw new Error(`timed out waiting for merge job ${id}`);
+}
 
 // ---------------------------------------------------------------------------
 // bl queue

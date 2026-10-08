@@ -20,7 +20,7 @@ compatibility_flags = ["nodejs_compat"]
 [[d1_databases]]
 binding = "DB"
 database_name = "branchline"
-database_id = "FILL_ME__wrangler_d1_create_branchline"  # then: wrangler d1 execute branchline --file=../../schema/001_init.sql
+database_id = "af1bb584-8b71-4f24-a65f-52ddaa394bd5"  # created 2026-10-08 via wrangler d1 create branchline
 # Apply in order: schema/001_init.sql, schema/002_merge_sha.sql
 
 # --- KV: diff-response cache (1h TTL) ---------------------------------------
@@ -28,7 +28,7 @@ database_id = "FILL_ME__wrangler_d1_create_branchline"  # then: wrangler d1 exec
 # so KV is optional — but bind it in production for cross-instance caching.
 [[kv_namespaces]]
 binding = "DIFF_CACHE"
-id = "FILL_ME__wrangler_kv_namespace_create_DIFF_CACHE"
+id = "3c86e9a8de204035a1810c2ea526d4b7"  # created 2026-10-08 via wrangler kv namespace create DIFF_CACHE
 
 # --- Queues: merge jobs ------------------------------------------------------
 # POST /api/merge sends to the queue when MERGE_QUEUE is bound (202 queued);
