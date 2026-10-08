@@ -8,11 +8,17 @@
 # (POST /api/branches/:name/commit). The server never touches an agent's
 # filesystem: agents could be on different machines.
 #
+# NOTE (honest framing): the "agents" here are simulated shell processes
+# driving the production API/CLI concurrently — stand-ins for real AI
+# coding agents, which would use the same `bl` commands over the network.
+#
 #   agent-1: adds src/auth/oauth.ts            -> tier 1 (disjoint files)
 #   agent-2: adds src/billing/refund.ts         -> tier 1 (disjoint files)
 #   agent-3: edits login.ts line 5             -> tier 1 (disjoint files)
 #   agent-4: edits login.ts lines 36-38        -> tier 2 (same file, other hunk)
 #   agent-2 (2nd task): edits login.ts line 5  -> tier 3 (same line, conflict)
+#   resolution: agent-2 reads the structured artifact from GET /api/queue,
+#     commits the fix to the same branch, re-merges -> tier 2
 #   (task 2 runs from a plain directory, not a git repo, to exercise
 #   `bl commit`'s snapshot fallback as well as the git-status path.)
 #
@@ -126,7 +132,10 @@ fi
 # --- 3. start the API ----------------------------------------------------------
 # NOTE: tsx is pointed at apps/api/tsconfig.json so dashboard.tsx compiles with
 # the same jsx:react-jsx + jsxImportSource:hono/jsx settings tsc uses.
-PORT=8787 REPO_PATH="$REPO" "$ROOT/node_modules/.bin/tsx" \
+# BL_ALLOW_ANON=1: the demo runs the local server with no token (local dev
+# mode). In production (ARTIFACTS bound) the server fails closed with 503
+# unless BL_TOKEN is set.
+PORT=8787 REPO_PATH="$REPO" BL_ALLOW_ANON=1 "$ROOT/node_modules/.bin/tsx" \
   --tsconfig "$ROOT/apps/api/tsconfig.json" \
   "$ROOT/apps/api/src/local-server.ts" >"$SRVLOG" 2>&1 &
 SERVER_PID=$!
@@ -264,6 +273,42 @@ echo "$M5" | head -2
 echo "$M5" | grep -q "conflict: src/auth/login.ts overlapping ranges: 5-5" \
   || fail "expected structured conflict on login.ts range 5-5"
 
+# --- 7b. resolve the tier-3 conflict on camera ----------------------------------
+# The resolution loop, exactly as documented in the README:
+#   1. read the structured artifact from GET /api/queue (never raw markers),
+#   2. decide the correct content — agent-2 reads both intent manifests and
+#      yields to agent-3's tighter login policy,
+#   3. `bl commit` the fix to the SAME branch (needs-resolution branches
+#      stay committable; only merged/abandoned are terminal),
+#   4. `bl merge` again -> the re-merge lands clean at tier 2.
+echo "--- resolving the tier-3 conflict ---"
+ARTIFACT="$(curl -sf "$BL_API/api/queue" | python3 -c "
+import json, sys
+jobs = json.load(sys.stdin)['queue']
+job = next(j for j in jobs if j['status'] == 'needs-resolution')
+c = job['artifact']['conflicts'][0]
+assert '<<<<<<<' not in json.dumps(job['artifact']), 'raw markers in artifact!'
+print(c['file'])
+print('ours intent: ' + c['ours_manifest']['intent'])
+print('theirs intent: ' + c['theirs_manifest']['intent'])
+")"
+echo "$ARTIFACT"
+echo "$ARTIFACT" | grep -q "^src/auth/login.ts$" || fail "artifact missing conflict file"
+echo "$ARTIFACT" | grep -q "ours intent: loosen login attempts" || fail "artifact missing ours intent"
+echo "$ARTIFACT" | grep -q "theirs intent: mainline integration" || fail "artifact missing theirs intent"
+echo "ok: structured artifact read from the queue (no raw markers)"
+
+# agent-2 resolves: keep agent-3's tighter policy (line 5 stays 3)
+sed -i 's/const MAX_LOGIN_ATTEMPTS = 10;/const MAX_LOGIN_ATTEMPTS = 3;/' "$D5/src/auth/login.ts"
+$BL commit "$B5" --repo "$D5" -m "agent-2: resolve conflict, keep tighter policy"
+echo "--- re-merging the resolved branch ---"
+M6="$($BL merge "$B5")"
+assert_merge "$M6" "tier=2 status=merged"
+echo "$M6" | head -1
+git -C "$REPO" show main:src/auth/login.ts | grep -q "MAX_LOGIN_ATTEMPTS = 3" \
+  || fail "main missing the resolved line-5 content after re-merge"
+echo "ok: re-merge succeeded, main contains the resolved content"
+
 # --- 8. assertions ---------------------------------------------------------------
 echo "--- assertions ---"
 
@@ -296,18 +341,21 @@ echo "ok: branches carry the agents' API commits"
 BRANCHES="$($BL branches)"
 echo "$BRANCHES" | grep -c "^bl/" | grep -q "^5$" \
   || fail "expected 5 branches, got: $BRANCHES"
-for spec in "$B1:merged" "$B2:merged" "$B3:merged" "$B4:merged" "$B5:needs-resolution"; do
+for spec in "$B1:merged" "$B2:merged" "$B3:merged" "$B4:merged" "$B5:merged"; do
   name="${spec%%:*}"; want="${spec##*:}"
   echo "$BRANCHES" | grep -q "$name.*$want" \
     || fail "branch $name not '$want' in: $BRANCHES"
 done
-echo "ok: 5 branches, statuses merged x4 + needs-resolution x1"
+echo "ok: 5 branches, all merged (B5 via the resolution loop)"
 
-# merge queue shows the tier-3 job
+# merge queue shows the tier-3 job AND its successful re-merge
 QUEUE="$($BL queue)"
 echo "$QUEUE" | grep -q "$B5.*needs-resolution" \
   || fail "tier-3 job missing from queue: $QUEUE"
 echo "ok: queue shows the tier-3 needs-resolution job"
+echo "$QUEUE" | grep -q "$B5.*merged" \
+  || fail "re-merge job missing from queue: $QUEUE"
+echo "ok: queue shows the tier-2 re-merge of the resolved branch"
 
 echo
 echo "DEMO PASS"
@@ -316,3 +364,4 @@ echo "  concurrent agent work:  4 (parallel file writes + API commits)"
 echo "  tier-1 merges:          3 (agent-1 oauth, agent-2 refund, agent-3 login line 5)"
 echo "  tier-2 merges:          1 (agent-4 login lines 36-38, same file, other hunk)"
 echo "  tier-3 needs-resolution: 1 (agent-2 task 2 vs agent-3, same line, structured artifact)"
+echo "  resolution loop:        1 (artifact -> bl commit -> re-merge tier 2)"

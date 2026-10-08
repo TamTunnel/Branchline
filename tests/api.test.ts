@@ -13,6 +13,8 @@ import { describe, it, expect, beforeAll } from "vitest";
 import { createApp } from "../apps/api/src/index.js";
 import worker from "../apps/api/src/index.js";
 import { InMemoryDb } from "../apps/api/src/shim.js";
+import { updateBranchStatus } from "../apps/api/src/db.js";
+import type { ArtifactsBinding } from "@branchline/core";
 
 const MARKER = "<<<<<<<";
 
@@ -401,6 +403,87 @@ describe("commit endpoint", () => {
       body: JSON.stringify({ files: { x: "y" }, message: "m" }),
     });
     expect(res.status).toBe(401);
+  });
+});
+
+describe("production guards", () => {
+  const fakeArtifacts = {} as unknown as ArtifactsBinding;
+
+  it("503s mutating routes when ARTIFACTS is bound and BL_TOKEN is unset (fail closed)", async () => {
+    const prod = createApp({
+      DB: new InMemoryDb(),
+      REPO_PATH: tmp,
+      ARTIFACTS: fakeArtifacts,
+    });
+    // /api/merge checks auth before touching the branch row or the backend.
+    const res = await prod.request("/api/merge", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ branch: "bl/nope" }),
+    });
+    expect(res.status).toBe(503);
+    expect((await res.json()).error).toMatch(/BL_TOKEN/);
+  });
+
+  it("BL_ALLOW_ANON=1 keeps local-dev open mode even with ARTIFACTS bound", async () => {
+    const prod = createApp({
+      DB: new InMemoryDb(),
+      REPO_PATH: tmp,
+      ARTIFACTS: fakeArtifacts,
+      BL_ALLOW_ANON: "1",
+    });
+    const res = await prod.request("/api/merge", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ branch: "bl/nope" }),
+    });
+    // Auth passed (no 503); the unknown branch then 404s.
+    expect(res.status).toBe(404);
+  });
+
+  it("409s a merge of an already-merged branch", async () => {
+    const name = await createBranch("merge twice", "agent-g", ["src/g/**"], base0);
+    await postJson(`/api/branches/${encodeURIComponent(name)}/commit`, {
+      files: { "src/g/f.txt": "f\n" },
+      message: "agent-g: f",
+    });
+    const d = await mergeBranch(name);
+    expect(d.status).toBe("merged");
+    const res = await post("/api/merge", { branch: name });
+    expect(res.status).toBe(409);
+  });
+
+  it("allows committing to a needs-resolution branch (the resolution loop)", async () => {
+    const name = await createBranch("resolve me", "agent-g", ["src/h/**"], base0);
+    await updateBranchStatus(db, name, "needs-resolution");
+    const res = await post(`/api/branches/${encodeURIComponent(name)}/commit`, {
+      files: { "src/h/fix.txt": "fixed\n" },
+      message: "agent-g: resolve",
+    });
+    expect(res.status).toBe(201);
+  });
+
+  it("expected_sha guards against lost updates", async () => {
+    const name = await createBranch("lost update", "agent-g", ["src/i/**"], base0);
+    const enc = encodeURIComponent(name);
+    const first = await postJson(`/api/branches/${enc}/commit`, {
+      files: { "src/i/a.txt": "a\n" },
+      message: "agent-g: a",
+    });
+    // Correct sha -> 201.
+    const ok = await post(`/api/branches/${enc}/commit`, {
+      files: { "src/i/b.txt": "b\n" },
+      message: "agent-g: b",
+      expected_sha: first.sha,
+    });
+    expect(ok.status).toBe(201);
+    // Stale sha -> 409.
+    const stale = await post(`/api/branches/${enc}/commit`, {
+      files: { "src/i/c.txt": "c\n" },
+      message: "agent-g: c",
+      expected_sha: first.sha,
+    });
+    expect(stale.status).toBe(409);
   });
 });
 

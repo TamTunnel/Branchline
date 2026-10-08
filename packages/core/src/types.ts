@@ -210,6 +210,12 @@ export interface Env {
   REPO_PATH: string;
   /** Optional repo-scoped token; when set, mutating routes require `Authorization: Bearer <token>`. */
   BL_TOKEN?: string;
+  /**
+   * Set to "1" to allow unauthenticated mutating requests when BL_TOKEN is
+   * unset and the ARTIFACTS binding is present. Local-dev escape hatch only;
+   * without it, production (ARTIFACTS bound) fails closed with 503.
+   */
+  BL_ALLOW_ANON?: string;
   /** Optional KV binding for diff caching (stub: in-memory fallback when absent). */
   DIFF_CACHE?: {
     get(key: string): Promise<string | null>;

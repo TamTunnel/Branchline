@@ -27,7 +27,10 @@ credentials exist in this environment.
 
 No other secrets are required. `BL_TOKEN` (repo-scoped API token for the
 worker's mutating routes) is set at deploy time via
-`wrangler secret put BL_TOKEN` — P chooses the value.
+`wrangler secret put BL_TOKEN` — P chooses the value. It is REQUIRED in
+production: when `ARTIFACTS` is bound and `BL_TOKEN` is unset, every
+mutating route fails closed with `503`. (`BL_ALLOW_ANON=1` opts back into
+open mode — local dev only, never production.)
 
 ## Provisioning checklist (run in `apps/api/`)
 
@@ -116,21 +119,28 @@ should run the curl smoke test above and watch for
 
 ```bash
 BASE=https://branchline.<your-subdomain>.workers.dev
-TOKEN=<the BL_TOKEN you set>   # omit -H if BL_TOKEN is unset
+TOKEN=<the BL_TOKEN you set>   # REQUIRED: without it, mutating routes 503
+                               # (the server fails closed when ARTIFACTS is bound)
 H=(-H "Authorization: Bearer $TOKEN" -H "content-type: application/json")
+
+# Branch names contain slashes: URL-encode for raw curl (python shown;
+# the bl CLI does this automatically).
+enc() { python3 -c "import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1], safe=''))" "$1"; }
 
 # 1. create a branch
 curl -s "${H[@]}" -X POST $BASE/api/branches \
   -d '{"intent":"smoke test","agent_id":"smoke","touches":["smoke/**"]}'
 # -> {"name":"bl/smoke-smoke-test-<hash>", ...}; save as $BR
+BR=bl/smoke-smoke-test-<hash>   # paste the real name here
+BE=$(enc "$BR")
 
 # 2. commit a file to it through the API (no git needed client-side)
-curl -s "${H[@]}" -X POST $BASE/api/branches/$BR/commit \
+curl -s "${H[@]}" -X POST $BASE/api/branches/$BE/commit \
   -d '{"files":{"smoke/hello.txt":"hello from the smoke test\n"},"message":"smoke: hello"}'
 # -> {"sha":"..."} 201
 
 # 3. diff + merge + queue
-curl -s "$BASE/api/diff?from=main&to=$BR"
+curl -s "$BASE/api/diff?from=main&to=$BE"
 curl -s "${H[@]}" -X POST $BASE/api/merge -d "{\"branch\":\"$BR\"}"
 curl -s "$BASE/api/queue"
 curl -s "$BASE/" | grep -o "<title>Branchline</title>"

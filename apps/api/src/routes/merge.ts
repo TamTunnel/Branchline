@@ -61,6 +61,9 @@ export async function processMergeJob(
       });
       throw new Error(`branch not found: ${branch}`);
     }
+    if (row.status !== "open" && row.status !== "needs-resolution") {
+      return fail(`branch is ${row.status}; refusing to merge`);
+    }
 
     // Resolve refs and build FileMaps.
     const branchHead = await backend.revParse(branch);
@@ -130,10 +133,22 @@ export async function processMergeJob(
 
     if (decision.tier === 2) {
       await backend.checkout(target);
-      const sha = await backend.applyMerge(
-        mergedFileContents(decideArgs),
-        `branchline: merge ${branch} into ${target} (tier 2)`,
-      );
+      let sha: string;
+      try {
+        sha = await backend.applyMerge(
+          mergedFileContents(decideArgs),
+          `branchline: merge ${branch} into ${target} (tier 2)`,
+        );
+      } catch (err) {
+        if (err instanceof Error && /nothing to commit/i.test(err.message)) {
+          // The merged tree is byte-identical to the target (e.g. a
+          // conflict resolved by taking the target's content): there is
+          // nothing to commit, and the merge outcome is already realized.
+          sha = await backend.revParse(target);
+        } else {
+          throw err;
+        }
+      }
       await updateMerge(db, mergeId, {
         tier: 2,
         status: "merged",
@@ -181,6 +196,14 @@ export function registerMergeRoutes(
     // 1. Load the branch row.
     const row = await getBranch(db, branch);
     if (!row) return c.json({ error: `branch not found: ${branch}` }, 404);
+    // needs-resolution branches stay mergeable: that is the resolution loop
+    // (fix -> commit -> merge again). Terminal states are refused.
+    if (row.status !== "open" && row.status !== "needs-resolution") {
+      return c.json(
+        { error: `branch is ${row.status}; refusing to merge` },
+        409,
+      );
+    }
 
     // 2. Enqueue the merge job row.
     const mergeId = await enqueueMerge(db, {
