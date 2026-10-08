@@ -124,8 +124,12 @@ interface MergeComputation {
  * - Tier 3 iff any conflicts: status "needs-resolution", merged_files holds
  *   only the clean files.
  *
- * A file matching neither side's touch globs counts as touched by BOTH
- * (conservative).
+ * A file changed outside both sides' declared touch globs counts as touched
+ * by both sides that actually changed it (conservative: undeclared changes
+ * are never silently auto-merged when the other side changed the file too).
+ * Crucially, declared globs only ever *narrow* attribution: a side is never
+ * marked as touching a file it did not actually change, no matter how broad
+ * its declared globs are.
  */
 function computeMerge(args: DecideMergeArgs): MergeComputation {
   const { baseFiles, oursFiles, theirsFiles, oursManifest, theirsManifest, oursTouches, theirsTouches } = args;
@@ -148,8 +152,12 @@ function computeMerge(args: DecideMergeArgs): MergeComputation {
   for (const f of changedFiles) {
     const mo = touchedBy(oursTouches, f);
     const mt = touchedBy(theirsTouches, f);
-    if (mo || !mt) oursTouched.add(f);
-    if (mt || !mo) theirsTouched.add(f);
+    const undeclared = !mo && !mt;
+    // Attribution = actual change ∩ (declared match ∪ neither-declared).
+    // Declared globs narrow attribution; they never widen it to files the
+    // side did not change.
+    if (oursChanged.has(f) && (mo || undeclared)) oursTouched.add(f);
+    if (theirsChanged.has(f) && (mt || undeclared)) theirsTouched.add(f);
   }
   const overlap = new Set([...oursTouched].filter((f) => theirsTouched.has(f)));
 

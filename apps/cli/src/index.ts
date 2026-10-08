@@ -94,12 +94,13 @@ function truncate(s: string, n: number): string {
   return s.length > n ? `${s.slice(0, n - 3)}...` : s;
 }
 
-function printTable(headers: string[], rows: string[][]): void {
+function printTable(headers: string[], rows: unknown[][]): void {
+  const cell = (c: unknown): string => (c === null || c === undefined ? "" : String(c));
   const widths = headers.map((h, i) =>
-    Math.max(h.length, ...rows.map((r) => (r[i] ?? "").length)),
+    Math.max(h.length, ...rows.map((r) => cell(r[i]).length)),
   );
-  const line = (cells: string[]): string =>
-    cells.map((c, i) => (c ?? "").padEnd(widths[i])).join("  ");
+  const line = (cells: unknown[]): string =>
+    cells.map((c, i) => cell(c).padEnd(widths[i])).join("  ");
   console.log(line(headers));
   for (const row of rows) console.log(line(row));
 }

@@ -149,3 +149,22 @@ export class LocalGitBackend implements GitBackend {
     return this.git(["merge-base", a, b]);
   }
 }
+
+/**
+ * Select the GitBackend for this environment.
+ *
+ * Today the only real implementation is LocalGitBackend (working git repo at
+ * REPO_PATH). When the Cloudflare Artifacts binding is present, the
+ * Artifacts-backed implementation plugs in here behind the same GitBackend
+ * interface — it does not exist yet, so binding ARTIFACTS fails loudly
+ * instead of silently doing the wrong thing. See DEPLOY.md.
+ */
+export function createBackend(env: { ARTIFACTS?: unknown; REPO_PATH: string }): GitBackend {
+  if (env.ARTIFACTS) {
+    throw new Error(
+      "Artifacts-backed GitBackend is not implemented yet (see DEPLOY.md). " +
+        "Unbind ARTIFACTS to use the local git backend.",
+    );
+  }
+  return new LocalGitBackend(env.REPO_PATH);
+}
