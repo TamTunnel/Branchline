@@ -74,6 +74,12 @@ cd apps/cli && npm run build && cd -
 BL=node apps/cli/dist/index.js
 $BL branch --intent "add oauth login" --touches "src/auth/**" --agent agent-1
 $BL branches
+
+# 4. commit work to the branch through the API (from the agent's own dir)
+mkdir -p /tmp/agent-1 && cd /tmp/agent-1
+echo "oauth stub" > oauth.ts
+$BL commit bl/agent-1-add-oauth-login-<hash> --repo /tmp/agent-1 -m "agent-1: add oauth"
+# (use the branch name printed by step 3); then $BL merge <branch>
 ```
 
 Useful env vars: `BL_API` (API base URL, default `http://127.0.0.1:8787`),
@@ -81,8 +87,10 @@ Useful env vars: `BL_API` (API base URL, default `http://127.0.0.1:8787`),
 
 ## The demo rehearsal
 
-`scripts/demo.sh` is the competition-video rehearsal — 4 simulated agents,
-same base, sequential merges across all three tiers:
+`scripts/demo.sh` is the competition-video rehearsal — 4 simulated agents
+cut from the same base, working **concurrently** (parallel file writes +
+API commits from isolated working dirs), then sequential merges across all
+three tiers:
 
 | Agent | Change | Merge |
 |---|---|---|
@@ -96,9 +104,11 @@ same base, sequential merges across all three tiers:
 bash scripts/demo.sh   # spins up API + repo, asserts every tier, prints DEMO PASS
 ```
 
-Assertions: correct tier per merge, no `<<<<<<<` anywhere, merged content
-present on `main`, D1 registry consistent (5 branches: 4 merged, 1
-needs-resolution).
+Assertions: all 5 branches cut from the same base SHA, correct tier per
+merge, no `<<<<<<<` anywhere, merged content present on `main`, D1 registry
+consistent (5 branches: 4 merged, 1 needs-resolution). Agents commit via
+`POST /api/branches/:name/commit` — the server never touches their working
+dirs, which is exactly the production path on Workers.
 
 ## Tests
 
@@ -106,25 +116,29 @@ needs-resolution).
 npm test            # vitest: unit (core) + API integration (Hono app.request, temp git repo, D1 shim)
 ```
 
-53 tests green. `npx tsc --noEmit` clean in `packages/core`, `apps/api`, `apps/cli`.
+78 tests green. `npx tsc --noEmit` clean in `packages/core`, `apps/api`, `apps/cli`.
 ## Competition submission notes
 
 - Entry: **Branchline** — "Git rebuilt for parallel agents".
 - License: **Apache-2.0** (competition-compatible).
 - What's real: semantic branches + D1 registry, agent-readable JSON diffs,
-  deterministic 3-tier merge queue, Bearer-token auth stub,
-  server-rendered dashboard, full local test suite + demo rehearsal, and
-  the **Artifacts GitBackend** (`apps/api/src/git/artifacts-git.ts`):
-  reads go through the Artifacts Workers binding, mutations clone into an
-  in-memory filesystem and push via isomorphic-git. Selected automatically
-  when `ARTIFACTS` is bound.
+  agent commits via `POST /api/branches/:name/commit` (the CLI's
+  `bl commit` posts changed files; no shared filesystem needed),
+  deterministic 3-tier merge queue, Bearer-token auth guard,
+  server-rendered dashboard with a branch graph, full local test suite +
+  demo rehearsal, and the **Artifacts GitBackend**
+  (`apps/api/src/git/artifacts-git.ts`): reads go through the Artifacts
+  Workers binding, mutations clone into an in-memory filesystem and push
+  via isomorphic-git. Selected automatically when `ARTIFACTS` is bound.
 - What's stubbed (documented, not hidden): KV diff cache falls back to
-  in-memory; merge queue processes inline without a Queue binding.
-  Honest note: the Artifacts backend is implemented against the documented
-  binding API but has not yet run against live Artifacts credentials —
-  binding shapes (`readTree`, `log` entry fields) are handled defensively
-  with a clone fallback for `listFiles`. See `DEPLOY.md` for the
-  production path and the exact credentials needed.
+  in-memory; merge queue processes inline without a Queue binding;
+  `LocalGitBackend` is single-user dev only (one shared working checkout;
+  never production traffic). Honest note: the Artifacts backend is
+  implemented against the documented binding API but has not yet run
+  against live Artifacts credentials — binding shapes (`readTree`, `log`
+  entry fields) are handled defensively with a clone fallback for
+  `listFiles`. See `DEPLOY.md` for the production path and the exact
+  credentials needed.
 
 ## Layout
 

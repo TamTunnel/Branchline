@@ -2,6 +2,16 @@ import { Hono } from "hono";
 import type { Env } from "@branchline/core";
 import { listMerges } from "../db.js";
 
+/** Parse a stored artifact; a malformed row degrades to null, not a 500. */
+function safeParseArtifact(raw: string | null): unknown {
+  if (!raw) return null;
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return null;
+  }
+}
+
 export function registerQueueRoutes(
   app: Hono<{ Bindings: Env }>,
   env: Env,
@@ -16,7 +26,7 @@ export function registerQueueRoutes(
     return c.json({
       queue: rows.map((r) => ({
         ...r,
-        artifact: r.artifact ? JSON.parse(r.artifact) : null,
+        artifact: safeParseArtifact(r.artifact),
       })),
     });
   });
